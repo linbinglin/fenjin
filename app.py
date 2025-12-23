@@ -5,8 +5,8 @@ import pandas as pd
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="剪辑引擎 V15 (字幕节奏版)",
-    page_icon="✂️",
+    page_title="导演引擎 V16 (动作回归版)",
+    page_icon="🎬",
     layout="wide"
 )
 
@@ -20,8 +20,8 @@ st.markdown("""
 
 # --- 侧边栏 ---
 with st.sidebar:
-    st.header("⚙️ 剪辑引擎 V15")
-    st.caption("核心：纯净断句，拒绝加戏")
+    st.header("⚙️ 导演引擎 V16")
+    st.caption("回归初心：角色·场景·动作")
     
     api_key = st.text_input("API Key", type="password", placeholder="sk-...")
     base_url = st.text_input("接口地址", value="https://blog.tuiwen.xyz/v1")
@@ -35,13 +35,12 @@ with st.sidebar:
         model_id = selected_model
 
     st.divider()
-    st.markdown("### ✂️ V15 断句法则")
+    st.markdown("### 🎬 V16 分镜原则")
     st.info("""
-    1. **物理阻断**：代码层强制删除AI生成的任何括号备注。
-    2. **标点逻辑**：
-       - 【。！？】是绝对分界线。
-       - 【，】是软分界线，仅在长句时切开。
-    3. **时长锚点**：35字 = 5秒红线。
+    **回归最原始的 3 大切分逻辑：**
+    1. 👤 **角色切换**：A说完B说 -> 切！
+    2. 🌍 **场景切换**：室内转室外/白天转黑夜 -> 切！
+    3. 🏃 **动作改变**：推倒 -> 画画 -> 穿衣。动作变了就必须切，哪怕只有3个字！
     """)
 
 # --- 核心工具函数 ---
@@ -52,11 +51,10 @@ def clean_text_for_ai(text):
 
 def sanitize_ai_output(text):
     """
-    【V15 新增核心功能】
-    强制清洗 AI 的幻觉（加戏）。
-    去除所有 (xxx)、（xxx）、【xxx】 内容。
+    【强制清洗】
+    不管Prompt怎么强调，防止AI脑补画面描述。
+    强制删除所有括号内容。
     """
-    # 去除圆括号、方括号及其内容
     text = re.sub(r'[\(（【\[].*?[\)）】\]]', '', text)
     return text
 
@@ -64,13 +62,13 @@ def normalize_text_for_comparison(text):
     """用于无损比对：忽略标点和空白"""
     punctuation = r"""!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~“”？，！【】（）、。：；’‘……——"""
     translator = str.maketrans('', '', punctuation)
-    # 先清洗可能的AI加戏
-    text = sanitize_ai_output(text)
+    text = sanitize_ai_output(text) # 先清洗
     text = re.sub(r'\d+[.、]', '', text)
     text = re.sub(r'\s+', '', text)
     return text.translate(translator)
 
-def smart_split_text(text, chunk_size=1000):
+def smart_split_text(text, chunk_size=800):
+    """分块稍微改小一点，保证AI注意力集中在动作分析上"""
     sentences = re.split(r'([。！？])', text)
     chunks = []
     current = ""
@@ -98,37 +96,35 @@ def parse_df(full_text):
         clean_content = re.sub(r'^\d+[.、]\s*', '', line)
         length = len(clean_content)
         
-        # 字幕节奏评分
-        if length > 35: status = "❌ 读不完 (>35)"
-        elif length > 25: status = "⚠️ 稍紧凑 (25-35)"
-        elif length < 8: status = "⚡ 短促 (8字内)"
-        else: status = "✅ 舒适 (8-25)"
+        # 视觉评分逻辑
+        if length > 35: status = "❌ 太长 (需再拆)"
+        elif length < 6: status = "⚡ 快切/动作"
+        else: status = "✅ 标准镜头"
             
         data.append({
             "序号": i+1,
-            "分镜文案": clean_content,
+            "分镜内容": clean_content,
             "字数": length,
-            "配音节奏": status
+            "类型": status
         })
     return pd.DataFrame(data)
 
 # --- 主程序 ---
-st.title("✂️ 剪辑引擎 V15 (无幻觉版)")
+st.title("🎬 导演引擎 V16 (动作回归版)")
 
-uploaded_file = st.file_uploader("📂 上传文案", type=['txt'])
+uploaded_file = st.file_uploader("📂 上传 TXT", type=['txt'])
 
 if uploaded_file:
     raw = uploaded_file.read().decode("utf-8")
     flat_input = clean_text_for_ai(raw)
     input_pure_len = len(normalize_text_for_comparison(flat_input))
-    
     chunks = smart_split_text(flat_input)
     
-    st.info(f"原文载入：{len(flat_input)} 字符 | {input_pure_len} 有效汉字 | 切分为 {len(chunks)} 块处理")
+    st.info(f"原文已就绪：{input_pure_len} 个有效汉字。正在准备按【动作/场景】进行拆解。")
 
     st.markdown("---")
     
-    if st.button("🚀 开始纯净断句", type="primary"):
+    if st.button("🚀 开始动作分镜拆解", type="primary"):
         if not api_key:
             st.error("请配置 API Key")
         else:
@@ -137,42 +133,42 @@ if uploaded_file:
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            # --- V15 核心指令：字幕逻辑，非导演逻辑 ---
+            # --- V16 核心 Prompt：回归初心 ---
             system_prompt = """
-            你是一个专业的【配音字幕断句师】。
-            你的任务是将长文案按照“人说话的呼吸节奏”拆分为多行。
+            你是一个严格的电影分镜师。
+            请将用户输入的文案，按照【镜头切换逻辑】进行分行处理。
+
+            【必须遵守的 3 大切分规则】：
+            1. **动作改变即切分**：
+               - 如果一句话里包含两个连续动作，必须换行。
+               - 例如：“他把我推倒在床上，开始画画” -> 必须切分为两行：“他把我推倒在床上”、“开始画画”。
+            2. **角色/场景切换即切分**：
+               - 对话人改变，或者时间/地点发生流逝，必须换行。
+            3. **强制长度限制**：
+               - 任何一行不得超过 35 字。如果原文太长，请在标点符号处切开。
 
             【绝对禁令】：
-            1. **严禁加戏**：绝对不要添加任何（场景描述）、（动作指导）、（情绪备注）。只输出原文！
-            2. **严禁删减**：原文的一个标点符号都不能少。
-
-            【断句规则】：
-            1. **硬切分**：遇到【。！？】必须换行。
-            2. **软切分**：遇到【，；】时，如果当前行已超过 20 个字，请在标点处换行。
-            3. **长度红线**：
-               - 任何一行不得超过 35 字。
-               - 如果一句话长达 50 字且没有标点（极少见），请在语义停顿处强制换行。
-            4. **防止过碎**：
-               - 如果短句（如“他说”）后紧跟标点，且后文属于同一气口，且总长<25字，可以不换行。
+            - **严禁修改原文**：不要改字，不要删字，不要加字。
+            - **严禁添加描述**：不要加括号，不要加画面说明，只保留原文。
+            - **不要合并**：不要因为句子短就合并，只要动作变了就必须切！
             """
 
             try:
                 for i, chunk in enumerate(chunks):
-                    status_text.markdown(f"**✂️ 正在剪辑第 {i+1}/{len(chunks)} 块...**")
+                    status_text.markdown(f"**🎬 正在分析第 {i+1}/{len(chunks)} 部分的动作画面...**")
                     
                     response = client.chat.completions.create(
                         model=model_id,
                         messages=[
                             {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": f"请对以下文案进行断句处理：\n{chunk}"}
+                            {"role": "user", "content": f"请对以下文本进行分镜切分：\n{chunk}"}
                         ],
-                        temperature=0.1 # 极低温，只做逻辑处理
+                        temperature=0.1 # 低温，严谨
                     )
                     
-                    # 获取结果
+                    # 获取结果并清洗
                     ai_raw_text = response.choices[0].message.content
-                    # --- 关键步骤：Python 侧再次清洗 ---
-                    # 无论 AI 有没有听话，这里强制把括号内容删掉，防止字数暴涨
+                    # 强制清洗：确保没有括号里的废话
                     cleaned_text = sanitize_ai_output(ai_raw_text)
                     
                     full_results.append(cleaned_text)
@@ -182,74 +178,62 @@ if uploaded_file:
                 combined = "\n".join(full_results)
                 final_lines = [line.strip() for line in combined.split('\n') if line.strip()]
                 
-                # 重建
+                # 重建输出
                 final_output_text = ""
                 raw_output_content = ""
                 for idx, line in enumerate(final_lines):
-                    # 清洗序号
                     clean = re.sub(r'^\d+[.、]\s*', '', line)
                     final_output_text += f"{idx+1}. {clean}\n"
                     raw_output_content += clean
 
-                # --- 结果看板 ---
-                st.success("✅ 剪辑完成！已自动剔除所有AI脑补的场景描述。")
+                # --- 结果展示与核对 ---
+                st.success("✅ 分镜拆解完成！")
                 
                 output_pure_len = len(normalize_text_for_comparison(raw_output_content))
                 diff = output_pure_len - input_pure_len
                 
-                # 统计看板
-                st.markdown("### 📊 纯净度核验")
+                # 看板
                 m1, m2, m3, m4 = st.columns(4)
+                m1.metric("原文汉字数", f"{input_pure_len}")
+                m2.metric("分镜汉字数", f"{output_pure_len}")
                 
-                m1.metric("📄 原文有效字数", f"{input_pure_len}")
-                m2.metric("🎬 分镜有效字数", f"{output_pure_len}")
-                
-                # 偏差值处理
                 if diff == 0:
-                    delta_msg = "完美无损"
-                    d_color = "normal"
-                elif diff > 0:
-                    delta_msg = f"多 {diff} 字"
-                    d_color = "inverse" # 红色
+                    m3.metric("内容完整度", "完美无损 ✅", delta="0", delta_color="normal")
                 else:
-                    delta_msg = f"少 {abs(diff)} 字"
-                    d_color = "inverse"
-                
-                m3.metric("⚖️ 内容偏差", f"{diff}", delta=delta_msg, delta_color=d_color)
-                
-                avg_len = round(len(raw_output_content)/len(final_lines), 1)
-                m4.metric("平均每行字数", f"{avg_len}", help="20左右为最佳配音节奏")
+                    m3.metric("偏差值", f"{diff}", delta="异常", delta_color="inverse")
+                    
+                m4.metric("分镜总组数", f"{len(final_lines)}", help="组数越多，说明动作拆解越细致")
 
-                if abs(diff) > 10:
-                     st.error(f"⚠️ 依然存在 {abs(diff)} 字的偏差。请检查是否 AI 输出了无关的前言或后语。")
+                if abs(diff) > 5:
+                    st.error(f"⚠️ 警告：检测到 {abs(diff)} 字的偏差，请检查 AI 是否有遗漏。")
 
-                # 内容展示
+                # 内容区
                 c1, c2 = st.columns([1.5, 1])
                 
                 with c1:
-                    st.subheader("📝 分镜结果 (已清洗)")
-                    st.text_area("文案预览", value=final_output_text, height=650)
-                    st.download_button("📥 下载文案", data=final_output_text, file_name="分镜文案.txt")
+                    st.subheader("📝 动作分镜脚本")
+                    st.text_area("结果预览", value=final_output_text, height=650)
+                    st.download_button("📥 下载分镜", data=final_output_text, file_name="动作分镜.txt")
 
                 with c2:
-                    st.subheader("⏱️ 节奏分析")
+                    st.subheader("📊 画面分析表")
                     df = parse_df(final_output_text)
                     st.dataframe(
                         df,
                         column_config={
                             "序号": st.column_config.NumberColumn(width="small"),
-                            "分镜文案": st.column_config.TextColumn(width="large"),
+                            "分镜内容": st.column_config.TextColumn(width="large"),
                             "字数": st.column_config.ProgressColumn(
-                                "阅读时长", 
+                                "画面负荷", 
                                 format="%d", 
                                 min_value=0, 
                                 max_value=40
                             ),
-                            "配音节奏": st.column_config.TextColumn(width="medium")
+                            "类型": st.column_config.TextColumn(width="medium")
                         },
                         hide_index=True,
                         height=650
                     )
 
             except Exception as e:
-                st.error(f"❌ 出错了: {e}")
+                st.error(f"❌ 错误: {e}")
