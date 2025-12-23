@@ -3,112 +3,114 @@ from openai import OpenAI
 import re
 
 # --- 工具函数 ---
-def count_pure_text(text):
-    # 移除编号和空白符计算纯文字
-    text = re.sub(r'\d+\.', '', text)
+def get_pure_text(text):
+    """提取分镜后的纯文本内容，用于字数校验"""
+    # 移除数字编号（如 1. 10. 100.）
+    text = re.sub(r'\d+[\.、]\s*', '', text)
+    # 移除所有空白符和换行
     clean_text = "".join(text.split())
-    return len(clean_text)
-
-def analyze_scenes(text):
-    # 计算分镜总数和平均字数
-    lines = [line for line in text.split('\n') if line.strip() and re.match(r'^\d+\.', line.strip())]
-    scene_count = len(lines)
-    total_chars = count_pure_text(text)
-    avg_chars = total_chars / scene_count if scene_count > 0 else 0
-    return scene_count, avg_chars
+    return clean_text
 
 # --- 页面配置 ---
-st.set_page_config(page_title="解说分镜 Pro 2.0", layout="wide")
+st.set_page_config(page_title="解说分镜·像素级还原版", layout="wide")
 
-st.sidebar.title("⚙️ 高级配置")
+st.sidebar.title("⚙️ 配置中心")
 api_key = st.sidebar.text_input("API Key", type="password")
-base_url = st.sidebar.text_input("中转地址", value="https://blog.tuiwen.xyz/v1")
+base_url = st.sidebar.text_input("API Base URL", value="https://blog.tuiwen.xyz/v1")
 model_id = st.sidebar.text_input("Model ID", value="gpt-4o")
 
 st.sidebar.divider()
-st.sidebar.markdown("""
-**💡 优化后的分镜逻辑：**
-1. **合并叙述**：同一人连续说话或同一连贯动作，合并输出。
-2. **长度平衡**：尽量让每行接近 25-35 字。
-3. **拒绝碎片**：严禁出现 10 字以下的无意义拆分。
+st.sidebar.warning("""
+**💡 导演避雷指南：**
+1. **单行限额**：严格禁止单行超过 35 字。
+2. **禁止总结**：AI 必须像打字机一样还原原文。
+3. **强制编号**：每行必须以 '数字.' 开头。
 """)
 
 # --- 主界面 ---
-st.title("🎬 电影解说·智能分镜系统 (防碎片版)")
+st.title("🎬 电影解说·像素级自动分镜系统")
+st.caption("解决分镜太碎、漏字、超长等痛点。适用于所有文本类型。")
 
-uploaded_file = st.file_uploader("📂 上传文案 (.txt)", type=['txt'])
+uploaded_file = st.file_uploader("📂 上传文本文件 (.txt)", type=['txt'])
 
 if uploaded_file is not None:
     raw_content = uploaded_file.getvalue().decode("utf-8")
-    merged_input = "".join(raw_content.split()) # 强力去段落
-    input_count = len(merged_input)
+    # 清洗：合并所有行，去除原文可能存在的干扰格式
+    input_clean = "".join(raw_content.split())
+    input_len = len(input_clean)
 
-    # 统计面板
-    st.subheader("📊 文案数据监控")
-    stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
-    stat_col1.metric("原文总字数", f"{input_count} 字")
+    # 统计看板
+    st.subheader("📊 文案状态监控")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("待处理总字数", f"{input_len} 字")
 
-    if st.button("🚀 智能重构分镜"):
+    if st.button("🔥 开始高精度分镜"):
         if not api_key:
             st.error("请配置 API Key")
         else:
             try:
-                # 兼容中转接口
-                clean_url = base_url.replace("/chat/completions", "").replace("/chat/completion", "")
-                client = OpenAI(api_key=api_key, base_url=clean_url)
+                # 兼容性处理
+                actual_url = base_url.split('/chat')[0]
+                client = OpenAI(api_key=api_key, base_url=actual_url)
                 
-                with st.spinner('正在进行语义聚合，优化分镜节奏...'):
-                    # --- 核心指令：引入语义聚合逻辑 ---
-                    system_prompt = """你是一个资深的电影解说导演。你需要将文案重组成高质量的分镜脚本。
+                with st.spinner('正在进行像素级拆解，请稍后...'):
+                    # --- 终极 Prompt：像素级还原指令 ---
+                    system_prompt = f"""你是一个电影解说脚本导演，你的工作是【无损拆解】文案。
                     
-【分镜聚合原则 - 拒绝碎片化】：
-1. **语义合并**：如果一句话很短，且后续动作或台词属于同一情境，必须合并在一起。不要每一小句都换行。
-2. **字数饱和度**：每个分镜的目标长度是 20 到 35 个字符。只有当字数超过 35 字，或者发生了剧烈的场景/角色切换时，才允许分行。
-3. **切换触发点**：
-   - A 说话结束，换成 B 说话。
-   - 环境从 室内 切换到 室外，或时间大幅跳跃。
-   - 一个核心动作完成（如：从“跪地求饶”转变为“皇帝起身离去”）。
-4. **文字精度**：严禁删减或增加原文中的任何字句。
-5. **拒绝碎片**：禁止出现诸如“1.他走了”“2.回头了”这种碎片，应合并为“1.他走了之后又再次回头”。
+【核心红线】：
+1. **零丢失还原**：严禁遗漏任何字！严禁合并、简化或改写原文内容！
+2. **35字物理截断**：单个分镜（一行）绝对不能超过 35 个字符。如果原句很长，必须在逻辑处切断。
+   - 错误：1.朕要找的人耳后有颗朱砂痣，你有吗，没等我求饶就被侍卫拖出去乱棍打死在宫墙下。（过长）
+   - 正确：
+     1.朕要找的人耳后有颗朱砂痣
+     2.你有吗
+     3.没等我求饶就被侍卫拖出去
+     4.乱棍打死在宫墙下
+3. **分镜逻辑**：
+   - 同一个动作或短对话，只要总长不超过 35 字，尽量合并为一行以防止太碎。
+   - 场景变迁、角色切换、大幅动作跨度必须换行。
+4. **强制格式**：每行必须使用“数字.内容”的格式。
+5. **任务流程**：将文本看作一个连续的字符流，每 20-35 个字符寻找一个语义点进行切分并编号。
 
-【输出格式】：
-1.文案内容
-2.文案内容
-（严禁输出任何多余的开场白或解释）"""
+不要输出任何前言和废话，直接输出分镜结果。"""
 
                     response = client.chat.completions.create(
                         model=model_id,
                         messages=[
                             {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": f"请对以下文案进行语义聚合分镜处理，保持35字限制但拒绝碎片化：\n\n{merged_input}"}
+                            {"role": "user", "content": f"请像素级拆解以下文本，确保不漏字，单行不超35字，必须带编号：\n\n{input_clean}"}
                         ],
-                        temperature=0,
+                        temperature=0, # 锁定确定性
                     )
 
-                    result_text = response.choices[0].message.content
-                    output_count = count_pure_text(result_text)
-                    scene_num, avg_len = analyze_scenes(result_text)
-
-                    # 更新统计面板
-                    stat_col2.metric("生成分镜数", f"{scene_num} 组")
-                    stat_col3.metric("平均每镜字数", f"{avg_len:.1f} 字")
+                    result_raw = response.choices[0].message.content
+                    output_clean = get_pure_text(result_raw)
+                    output_len = len(output_clean)
                     
-                    diff = output_count - input_count
-                    stat_col4.metric("字数偏差", f"{diff} 字")
+                    # 分析分镜数
+                    shot_lines = [l for l in result_raw.split('\n') if re.match(r'^\d+', l.strip())]
+                    shot_count = len(shot_lines)
 
-                    # 结果区
+                    # 更新看板
+                    m2.metric("生成分镜数", f"{shot_count} 组")
+                    m3.metric("处理后字数", f"{output_len} 字")
+                    diff = output_len - input_len
+                    m4.metric("字数差值", f"{diff} 字", delta_color="inverse")
+
                     st.divider()
-                    if diff != 0:
-                        st.error(f"⚠️ 字数校验未通过！漏字或多字：{diff} 字")
-                    else:
-                        st.success("✅ 字数完整性校验通过")
 
-                    res_col1, res_col2 = st.columns([2, 1])
-                    with res_col1:
-                        st.text_area("分镜结果预览", value=result_text, height=600)
-                    with res_col2:
-                        st.info("💡 导演建议：\n当前平均字数控制在25字以上为佳。如果分镜依然过多，建议调高聚合度。")
-                        st.download_button("💾 下载脚本", result_text, "script.txt")
+                    # 校验与展示
+                    if diff != 0:
+                        st.error(f"❌ 校验失败：当前误差 {diff} 字。AI 在处理时出现了漏字或擅自增词。")
+                    else:
+                        st.success("✅ 像素级校验通过：字数与原文完全一致。")
+
+                    c1, c2 = st.columns([2, 1])
+                    with c1:
+                        st.text_area("分镜详情", value=result_raw, height=600)
+                    with c2:
+                        st.info("💡 **分镜优化策略：**\n如果分镜太碎，是 AI 还没掌握好 35 字的边界。如果字数对齐但太碎，说明语义点切分过频。")
+                        st.download_button("💾 下载脚本", result_raw, file_name="storyboard.txt")
 
             except Exception as e:
                 st.error(f"处理失败：{str(e)}")
