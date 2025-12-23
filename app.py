@@ -3,60 +3,62 @@ from openai import OpenAI
 import re
 
 # 页面配置
-st.set_page_config(page_title="双重对冲分镜助手", page_icon="⚖️", layout="wide")
+st.set_page_config(page_title="精准分镜精剪工具", page_icon="✂️", layout="wide")
 
-st.title("⚖️ 电影解说文案：双重对冲纠偏分镜工具")
+st.title("✂️ 电影解说：逻辑导演 + 精准精剪")
 st.markdown("""
-**分镜修正策略：**
-1. **第一遍（逻辑拆解）**：侧重于剧情转场和动作拆分，建立初步结构。
-2. **第二遍（纠偏质检）**：**身份切换为“质检总监”**。负责“碎镜合并”与“长镜拆分”，解决 10%-50% 的逻辑误差，确保节奏平衡。
+**核心改进：**
+1. **第一遍（导演模式）**：负责 85% 的核心逻辑拆解。
+2. **第二遍（精剪模式）**：**禁止大规模重写**。采用“若非故障，切勿修理”原则。仅对字数超标或过碎的段落进行外科手术式修正。
 """)
 
 # --- 侧边栏配置 ---
-st.sidebar.header("⚙️ 核心配置")
+st.sidebar.header("⚙️ 模型配置")
 api_key = st.sidebar.text_input("请输入 API Key", type="password")
 base_url = st.sidebar.text_input("中转接口地址", value="https://blog.tuiwen.xyz/v1")
 
 model_options = ["deepseek-chat", "gpt-4o", "claude-3-5-sonnet-20240620", "gemini-1.5-pro"]
-selected_model = st.sidebar.selectbox("选择模型 (Model ID)", model_options + ["手动输入"])
+selected_model = st.sidebar.selectbox("选择 Model ID", model_options + ["手动输入"])
 model_id = st.sidebar.text_input("自定义 Model ID", value="deepseek-chat") if selected_model == "手动输入" else selected_model
 
 # --- 核心 Prompt 深度重构 ---
 
-# 第一阶段：身份——剧情导演（侧重逻辑）
-PROMPT_STAGE_1 = """你是一个电影导演。
-我会给你一段抹除了格式的纯文本。请你根据【场景转场、人物更换、核心动作切换】进行初步分镜。
-要求：
-1. 识别故事的起承转合。
-2. 每一个分镜必须是一个独立的视觉画面。
-3. 严禁改动或漏掉原文任何一个字。
-格式：序号.内容
+# 第一阶段：逻辑导演（负责 85% 的正确率）
+PROMPT_STAGE_1 = """你是一个专业的电影导演。
+任务：请对以下脱敏文本进行分镜。
+分镜标准：根据场景切换、角色更换、动作转折。
+硬性要求：
+1. 严禁改动、增加或删除原文中的任何一个字。
+2. 每个分镜必须反映一个独立的画面逻辑。
+格式：数字序号.内容
 """
 
-# 第二阶段：身份——高级质检总监（侧重节奏纠偏）
-PROMPT_STAGE_2 = """你现在的身份是电影后期【分镜质检总监】。你的权力高于第一遍分镜，你的任务是对第一遍的结果进行“纠偏”和“强制优化”。
+# 第二阶段：精剪校准员（负责剩下的 15% 修正）
+PROMPT_STAGE_2 = """你是一个极其克制的电影脚本【精剪校准员】。
+第一遍分镜已经完成了 85% 的工作，你的任务是进行微调，**绝对禁止推翻重来**。
 
-**你的质检任务清单：**
+**你的操作守则（优先级排序）：**
 
-1. **碎镜合并（解决视觉疲劳）**：
-   - 检查第一遍分镜。如果有连续的两个或多个分镜字数非常少（例如都在12字以内），且它们描述的是同一个场景或连续动作，请将它们【强制合并】为一个分镜。
-   - 理由：避免画面切换过快导致观众眼晕。
+1. **观察守则（核心）**：
+   - 如果一个分镜的长度在 12 到 35 个汉字之间，且逻辑通顺，请【原封不动】地保留它。
+   - 禁止为了修改而修改。
 
-2. **长镜拆分（解决音画脱节）**：
-   - 检查每一个分镜。如果字数超过 35 字，说明其音频时长超过 5 秒，这超出了单一镜头的停留极限，你必须在语义转折处将其【强制拆分】。
-   - 理由：确保文案音频能跟上视频画面，不出现声画长短不一。
+2. **长镜切分（仅针对字数 > 35 的分镜）**：
+   - 检查分镜，只有字数超过 35 字（语音超过 5 秒）时，才在最近的语义转折点（如标点、连词、动作起止点）拆分为两个。
+   - 拆分后要确保两段话依然是完整的。
 
-3. **文本对齐审计**：
-   - 必须对比我提供的“原始全文”。第一遍分镜往往会因为理解问题漏掉某些衔接词，你必须把漏掉的部分精准地找回来，填入到最合适的分镜中。
+3. **碎镜合并（仅针对字数 < 10 的分镜）**：
+   - 如果连续两个分镜极短（例如都在 8 字以内），且同属一个动作或场景，请将它们合并。
 
-4. **禁止偷懒**：
-   - 绝对不能原样照抄第一遍结果。如果第一遍存在超过35字或低于12字的段落，你必须出手干预。
+4. **全文审计**：
+   - 对比【原始全文】，确保第一遍分镜中没有漏掉任何文字。如果有漏字，请将其塞回对应的分镜。
 
-输出：最终优化后的、节奏平衡的完整分镜列表（序号.内容）。
+**输出要求：**
+- 保持第一遍的整体结构不变，仅输出修正后的最终分镜列表（序号.内容）。
 """
 
 # --- 主界面 ---
-uploaded_file = st.file_uploader("上传文案 (TXT)", type=['txt'])
+uploaded_file = st.file_uploader("上传 TXT 文案", type=['txt'])
 
 if uploaded_file is not None:
     # 彻底抹除格式
@@ -66,17 +68,17 @@ if uploaded_file is not None:
     col_in, col_s1, col_s2 = st.columns([1, 1, 1.2])
     
     with col_in:
-        st.subheader("1. 无格式原文")
-        st.text_area("Cleaned Text", cleaned_content, height=400)
+        st.subheader("1. 抹除格式原文")
+        st.text_area("Input", cleaned_content, height=400)
 
-    if st.button("🚀 开始双重纠偏处理"):
+    if st.button("🚀 执行精修分镜"):
         if not api_key:
             st.error("请配置 API Key")
         else:
             client = OpenAI(api_key=api_key, base_url=base_url)
             try:
                 # --- 第一阶段 ---
-                with st.status("正在进行阶段一：剧情逻辑解析...") as status:
+                with st.status("阶段一：逻辑导演拆解...") as status:
                     res1 = client.chat.completions.create(
                         model=model_id,
                         messages=[
@@ -87,35 +89,35 @@ if uploaded_file is not None:
                     )
                     stage1_out = res1.choices[0].message.content
                     with col_s1:
-                        st.subheader("2. 第一遍：逻辑初分")
-                        st.text_area("Stage 1 (Initial)", stage1_out, height=400)
+                        st.subheader("2. 导演初剪版")
+                        st.text_area("Stage 1", stage1_out, height=400)
                     
                     # --- 第二阶段 ---
-                    status.update(label="正在进行阶段二：质检纠偏（合并与拆分）...")
+                    status.update(label="阶段二：执行 15% 偏差微调...")
                     res2 = client.chat.completions.create(
                         model=model_id,
                         messages=[
                             {"role": "system", "content": PROMPT_STAGE_2},
-                            {"role": "user", "content": f"【原始全文】：\n{cleaned_content}\n\n【第一遍待检查分镜】：\n{stage1_out}"}
+                            {"role": "user", "content": f"【原始全文】：\n{cleaned_content}\n\n【初剪版分镜】：\n{stage1_out}"}
                         ],
-                        temperature=0.2
+                        temperature=0.1 # 极低温度，防止 AI 瞎改
                     )
                     final_out = res2.choices[0].message.content
-                    status.update(label="分镜质检完成！", state="complete")
+                    status.update(label="精修完成！", state="complete")
                     
                 with col_s2:
-                    st.subheader("3. 最终修正版（质检通过）")
-                    st.text_area("Final Corrected Output", final_out, height=400)
-                    st.download_button("下载结果", final_out, file_name="final_storyboard_qc.txt")
+                    st.subheader("3. 最终精剪对齐版")
+                    st.text_area("Final Output", final_out, height=400)
+                    st.download_button("下载结果", final_out, file_name="final_storyboard.txt")
                     
             except Exception as e:
                 st.error(f"处理失败: {str(e)}")
 
-# --- 技术原理 ---
+# --- 逻辑说明 ---
 st.markdown("---")
 st.info("""
-**纠偏原理说明：**
-- **针对 10% 误差文案**：AI 质检员会发现第一遍已经很完美，仅做极小幅度对齐校验。
-- **针对 50% 误差文案**：AI 质检员会发现大量过短或过长的分镜，并强制执行“外科手术式”的合并与拆分。
-- **强制对比**：Stage 2 的输入同时包含“原文”和“初剪”，通过双向对比消除“幻觉”和“遗漏”。
+**为什么这样能解决问题？**
+- **禁止过度干预**：明确告诉 AI“第一遍已经完成了 85%”，这在心理学上给 AI 设置了一个“锚点”，它会倾向于尊重第一遍的结果。
+- **条件触发制**：只有当【字数 > 35】或【字数 < 10】这两个硬指标触发时，AI 才被允许动刀。
+- **低温策略**：温度 0.1 确保 AI 走最稳健的路线，不产生幻觉和多余的联想。
 """)
