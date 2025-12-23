@@ -1,123 +1,115 @@
 import streamlit as st
 from openai import OpenAI
-import re
+import io
 
-# 页面配置
-st.set_page_config(page_title="精准分镜精剪工具", page_icon="✂️", layout="wide")
+# --- 页面配置 ---
+st.set_page_config(page_title="AI双重分镜大师", layout="wide")
 
-st.title("✂️ 电影解说：逻辑导演 + 精准精剪")
-st.markdown("""
-**核心改进：**
-1. **第一遍（导演模式）**：负责 85% 的核心逻辑拆解。
-2. **第二遍（精剪模式）**：**禁止大规模重写**。采用“若非故障，切勿修理”原则。仅对字数超标或过碎的段落进行外科手术式修正。
-""")
+st.title("🎬 电影解说双重分镜精修工具")
+st.markdown("采用 **[逻辑初分 + 节奏精修]** 双引擎模式，生成更符合剪辑逻辑的分镜稿。")
 
 # --- 侧边栏配置 ---
-st.sidebar.header("⚙️ 模型配置")
-api_key = st.sidebar.text_input("请输入 API Key", type="password")
-base_url = st.sidebar.text_input("中转接口地址", value="https://blog.tuiwen.xyz/v1")
+with st.sidebar:
+    st.title("⚙️ 配置中心")
+    api_key = st.text_input("请输入 API Key", type="password")
+    base_url = st.text_input("接口地址", value="https://blog.tuiwen.xyz/v1")
+    model_id = st.text_input("Model ID", value="gpt-4o")
+    
+    st.divider()
+    st.info("""
+    **双重分镜逻辑：**
+    1. **初分：** 识别场景、动作、对话。
+    2. **精修：** 优化节奏，合并碎片，拆分冗长段落。
+    """)
 
-model_options = ["deepseek-chat", "gpt-4o", "claude-3-5-sonnet-20240620", "gemini-1.5-pro"]
-selected_model = st.sidebar.selectbox("选择 Model ID", model_options + ["手动输入"])
-model_id = st.sidebar.text_input("自定义 Model ID", value="deepseek-chat") if selected_model == "手动输入" else selected_model
+# --- Prompt 定义 ---
 
-# --- 核心 Prompt 深度重构 ---
-
-# 第一阶段：逻辑导演（负责 85% 的正确率）
-PROMPT_STAGE_1 = """你是一个专业的电影导演。
-任务：请对以下脱敏文本进行分镜。
-分镜标准：根据场景切换、角色更换、动作转折。
-硬性要求：
-1. 严禁改动、增加或删除原文中的任何一个字。
-2. 每个分镜必须反映一个独立的画面逻辑。
-格式：数字序号.内容
+# 第一步：逻辑初分
+PROMPT_STEP1_DRAFT = """你是一个专业的电影剪辑师。请对以下文本进行初步分镜。
+要求：
+1. 识别场景切换、人物对话改变、重大动作改变，并以此作为分镜切口。
+2. 保持原文完整，不增不减。
+3. 每个分镜逻辑清晰，连贯。
+4. 格式：
+1.分镜内容
+2.分镜内容
 """
 
-# 第二阶段：精剪校准员（负责剩下的 15% 修正）
-PROMPT_STAGE_2 = """你是一个极其克制的电影脚本【精剪校准员】。
-第一遍分镜已经完成了 85% 的工作，你的任务是进行微调，**绝对禁止推翻重来**。
+# 第二步：精修优化
+PROMPT_STEP2_REFINE = """你是一个资深的视频分镜导演。现在请你对下方的初稿分镜进行“节奏精修”。
+你的目标是让分镜文案的阅读时长更适合视频剪辑（每个分镜建议在3-6秒之间）。
 
-**你的操作守则（优先级排序）：**
-
-1. **观察守则（核心）**：
-   - 如果一个分镜的长度在 12 到 35 个汉字之间，且逻辑通顺，请【原封不动】地保留它。
-   - 禁止为了修改而修改。
-
-2. **长镜切分（仅针对字数 > 35 的分镜）**：
-   - 检查分镜，只有字数超过 35 字（语音超过 5 秒）时，才在最近的语义转折点（如标点、连词、动作起止点）拆分为两个。
-   - 拆分后要确保两段话依然是完整的。
-
-3. **碎镜合并（仅针对字数 < 10 的分镜）**：
-   - 如果连续两个分镜极短（例如都在 8 字以内），且同属一个动作或场景，请将它们合并。
-
-4. **全文审计**：
-   - 对比【原始全文】，确保第一遍分镜中没有漏掉任何文字。如果有漏字，请将其塞回对应的分镜。
-
-**输出要求：**
-- 保持第一遍的整体结构不变，仅输出修正后的最终分镜列表（序号.内容）。
+精修准则：
+1. **合并碎片**：如果连续几个分镜字数过少（如2-5个字）且属于同一场景动作，请将其合并，避免视觉疲劳。
+2. **拆分冗长**：如果单个分镜文字过多（建议超过40字为上限参考），请在不改变原文文字的前提下，寻找自然的语感停顿处拆分为两个分镜。
+3. **保持平衡**：不需要强求每行字数完全一致，重点是“剧情逻辑自洽”和“节奏舒适”。
+4. **绝对原则**：严禁修改、增加或删除原文中的任何一个字。必须严格遵守原文顺序。
+5. **格式输出**：只输出最终的分镜列表，以数字编号开头。
 """
 
-# --- 主界面 ---
-uploaded_file = st.file_uploader("上传 TXT 文案", type=['txt'])
+# --- 主界面逻辑 ---
+uploaded_file = st.file_uploader("选择本地 TXT 文案文件", type=['txt'])
 
 if uploaded_file is not None:
-    # 彻底抹除格式
-    raw_content = uploaded_file.getvalue().decode("utf-8")
-    cleaned_content = "".join(raw_content.split())
+    raw_text = io.StringIO(uploaded_file.getvalue().decode("utf-8")).read()
     
-    col_in, col_s1, col_s2 = st.columns([1, 1, 1.2])
-    
-    with col_in:
-        st.subheader("1. 抹除格式原文")
-        st.text_area("Input", cleaned_content, height=400)
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("📄 原始文本")
+        st.text_area("Original", raw_text, height=400)
 
-    if st.button("🚀 执行精修分镜"):
+    if st.button("🚀 开始双重深度分镜"):
         if not api_key:
             st.error("请配置 API Key")
         else:
-            client = OpenAI(api_key=api_key, base_url=base_url)
             try:
-                # --- 第一阶段 ---
-                with st.status("阶段一：逻辑导演拆解...") as status:
-                    res1 = client.chat.completions.create(
+                client = OpenAI(api_key=api_key, base_url=base_url)
+                
+                # --- 第一步：初分 ---
+                with st.status("正在进行第一遍：剧情逻辑分析...", expanded=True) as status:
+                    response_draft = client.chat.completions.create(
                         model=model_id,
                         messages=[
-                            {"role": "system", "content": PROMPT_STAGE_1},
-                            {"role": "user", "content": cleaned_content}
+                            {"role": "system", "content": PROMPT_STEP1_DRAFT},
+                            {"role": "user", "content": raw_text}
                         ],
-                        temperature=0.3
+                        temperature=0.3,
                     )
-                    stage1_out = res1.choices[0].message.content
-                    with col_s1:
-                        st.subheader("2. 导演初剪版")
-                        st.text_area("Stage 1", stage1_out, height=400)
-                    
-                    # --- 第二阶段 ---
-                    status.update(label="阶段二：执行 15% 偏差微调...")
-                    res2 = client.chat.completions.create(
-                        model=model_id,
-                        messages=[
-                            {"role": "system", "content": PROMPT_STAGE_2},
-                            {"role": "user", "content": f"【原始全文】：\n{cleaned_content}\n\n【初剪版分镜】：\n{stage1_out}"}
-                        ],
-                        temperature=0.1 # 极低温度，防止 AI 瞎改
-                    )
-                    final_out = res2.choices[0].message.content
-                    status.update(label="精修完成！", state="complete")
-                    
-                with col_s2:
-                    st.subheader("3. 最终精剪对齐版")
-                    st.text_area("Final Output", final_out, height=400)
-                    st.download_button("下载结果", final_out, file_name="final_storyboard.txt")
-                    
-            except Exception as e:
-                st.error(f"处理失败: {str(e)}")
+                    draft_result = response_draft.choices[0].message.content
+                    st.write("初稿生成完毕...")
 
-# --- 逻辑说明 ---
-st.markdown("---")
-st.info("""
-**为什么这样能解决问题？**
-- **禁止过度干预**：明确告诉 AI“第一遍已经完成了 85%”，这在心理学上给 AI 设置了一个“锚点”，它会倾向于尊重第一遍的结果。
-- **条件触发制**：只有当【字数 > 35】或【字数 < 10】这两个硬指标触发时，AI 才被允许动刀。
-- **低温策略**：温度 0.1 确保 AI 走最稳健的路线，不产生幻觉和多余的联想。
-""")
+                    # --- 第二步：精修 ---
+                    st.write("正在进行第二遍：节奏精修与节奏对齐...")
+                    response_refine = client.chat.completions.create(
+                        model=model_id,
+                        messages=[
+                            {"role": "system", "content": PROMPT_STEP2_REFINE},
+                            {"role": "user", "content": f"这是分镜初稿，请进行精修处理：\n\n{draft_result}"}
+                        ],
+                        temperature=0.2,
+                    )
+                    final_result = response_refine.choices[0].message.content
+                    status.update(label="分镜精修完成！", state="complete", expanded=False)
+
+                with col2:
+                    st.subheader("🎬 最终精修分镜")
+                    st.text_area("Final Output", final_result, height=400)
+                    
+                    st.download_button(
+                        label="📥 下载最终分镜稿",
+                        data=final_result,
+                        file_name="双重精修分镜.txt",
+                        mime="text/plain"
+                    )
+
+            except Exception as e:
+                st.error(f"处理失败：{str(e)}")
+
+# --- 使用技巧 ---
+st.divider()
+with st.expander("💡 为什么采用双重分镜？"):
+    st.write("""
+    - **逻辑感**：第一遍让AI像导演一样理解故事，不会因为字数限制而切断一个完整的动作。
+    - **节奏感**：第二遍让AI像剪辑师一样控制时长。它会发现第一遍中“太长的句子”并手动切开，或者把“太碎的动作”合并。
+    - **稳定性**：通过两轮对话，AI对原文的记忆会加深，有效降低遗漏文字的概率。
+    """)
