@@ -3,168 +3,151 @@ from openai import OpenAI
 import re
 import pandas as pd
 
-# --- 核心工具函数：重排列序号 ---
-def reindex_storyboard(text):
-    """
-    不管用户如何删除或增加换行，一键重新从 1 开始排列所有序号
-    """
-    # 移除原本可能存在的序号（支持 数字. 或 数字、）
-    lines = text.split('\n')
-    new_lines = []
-    count = 1
-    for line in lines:
-        # 去掉每行开头的数字和标点
-        clean_line = re.sub(r'^\d+[\.、]\s*', '', line).strip()
-        if clean_line:
-            new_lines.append(f"{count}.{clean_line}")
-            count += 1
-    return "\n".join(new_lines)
-
-# --- 核心工具函数：智能语义分块 ---
-def smart_chunk_text(text, max_chars=1000):
-    chunks = []
-    while len(text) > max_chars:
-        split_index = -1
-        for mark in ["\n", "。", "！", "？"]:
-            pos = text.rfind(mark, 0, max_chars)
-            split_index = max(split_index, pos)
-        if split_index == -1:
-            split_index = max_chars
-        else:
-            split_index += 1
-        chunks.append(text[:split_index].strip())
-        text = text[split_index:]
-    chunks.append(text.strip())
-    return [c for c in chunks if c]
-
-def get_pure_text(text):
-    text = re.sub(r'\d+[\.、]\s*', '', text)
+# --- 1. 核心逻辑函数 ---
+def get_clean_text(text):
+    """提取纯文本，排除编号和空格，用于严苛对账"""
+    if not text: return ""
+    # 移除类似 1. 或 1、 的行首编号
+    text = re.sub(r'^\s*\d+[\.、]\s*', '', text, flags=re.MULTILINE)
+    # 移除所有空白符、换行
     return "".join(text.split())
 
-# --- 页面配置 ---
-st.set_page_config(page_title="解说分镜导演 Pro V12 (人机协作版)", layout="wide")
+def reindex_text(text):
+    """手动微调后的序号重排系统"""
+    lines = text.split('\n')
+    valid_lines = []
+    count = 1
+    for line in lines:
+        # 去掉原序号
+        content = re.sub(r'^\s*\d+[\.、]\s*', '', line).strip()
+        if content:
+            valid_lines.append(f"{count}.{content}")
+            count += 1
+    return "\n".join(valid_lines)
 
-# --- 侧边栏配置 ---
-st.sidebar.title("⚙️ 导演引擎配置")
-api_key = st.sidebar.text_input("1. API Key", type="password")
-base_url = st.sidebar.text_input("2. 接口地址", value="https://blog.tuiwen.xyz/v1")
-model_id = st.sidebar.text_input("3. Model ID", value="gpt-4o")
+# --- 2. 页面配置 ---
+st.set_page_config(page_title="解说分镜 Pro V13", layout="wide")
 
-st.sidebar.divider()
-st.sidebar.markdown("""
-**🎞️ V12 协作准则：**
-1. **AI 初剪**：基于视觉主语切换。
-2. **人工精剪**：支持在下方编辑器直接修改文案或换行。
-3. **一键重排**：修改后点击“校准序号”，序号自动对齐。
-""")
+# --- 3. 侧边栏配置 ---
+with st.sidebar:
+    st.title("⚙️ 引擎设置")
+    api_key = st.text_input("API Key", type="password")
+    base_url = st.text_input("接口地址", value="https://blog.tuiwen.xyz/v1")
+    model_id = st.text_input("Model ID", value="gpt-4o")
+    st.divider()
+    st.info("💡 模式：V13 像素无损版\n特点：分段处理，强力纠偏")
 
-# --- 主界面 ---
-st.title("🎞️ 全能文案·人机协同分镜系统 (V12)")
-st.caption("版本 12.0 | AI 深度规划 + 人工后期精修 | 支持一键自动重排序号")
+# --- 4. 初始化 Session State ---
+if 'final_storyboard' not in st.session_state:
+    st.session_state.final_storyboard = ""
+if 'original_text_clean' not in st.session_state:
+    st.session_state.original_text_clean = ""
 
-uploaded_file = st.file_uploader("📂 选择 TXT 文案", type=['txt'])
+# --- 5. 主界面 ---
+st.title("🎬 电影解说·分镜自动处理系统")
+uploaded_file = st.file_uploader("📂 选择本地 TXT 文案", type=['txt'])
 
-# 使用 Session State 存储分镜结果，以便用户微调
-if 'storyboard_draft' not in st.session_state:
-    st.session_state.storyboard_draft = ""
-
-if uploaded_file is not None:
-    raw_text = uploaded_file.getvalue().decode("utf-8")
-    input_stream = "".join(raw_text.split())
-    input_len = len(input_stream)
+if uploaded_file:
+    # 立即读取并锁定原始文字
+    content = uploaded_file.getvalue().decode("utf-8")
+    st.session_state.original_text_clean = "".join(content.split())
+    input_len = len(st.session_state.original_text_clean)
 
     # 监控面板
-    st.subheader("📊 创作数据稽核")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("原文总字数", f"{input_len} 字")
+    st.subheader("📊 逻辑监控看板")
+    col_a, col_b, col_c, col_d = st.columns(4)
+    col_a.metric("原文总字数", f"{input_len} 字")
 
-    # --- 逻辑 A：AI 自动化分镜 ---
-    if st.button("🚀 启动 AI 初步分镜"):
+    # --- 6. AI 处理逻辑 ---
+    if st.button("🚀 启动自动化分镜"):
         if not api_key:
-            st.error("请配置 API 参数")
+            st.error("请在侧边栏配置 API Key")
         else:
             try:
-                actual_base = base_url.split('/chat')[0].strip()
-                client = OpenAI(api_key=api_key, base_url=actual_base)
-                chunks = smart_chunk_text(input_stream)
+                # 规范化 URL
+                client = OpenAI(api_key=api_key, base_url=base_url.split('/chat')[0].strip())
                 
-                full_result = []
-                current_shot_idx = 1
-                progress_bar = st.progress(0)
+                # 分段处理，每段 1000 字，防止幻觉
+                text_full = st.session_state.original_text_clean
+                chunks = [text_full[i:i+1000] for i in range(0, len(text_full), 1000)]
                 
-                for idx, chunk in enumerate(chunks):
-                    with st.spinner(f'正在分析第 {idx+1}/{len(chunks)} 段语义...'):
-                        # V12 指令：强化“人称/行为”独立性
-                        system_prompt = f"""你是一个顶级的解说导演。
-【视觉独立原则】：
-1. 角色台词与他的内心独白或他人反应必须拆分为不同编号。
-2. 一个分镜只允许一个核心主语动作，主语切换必须切分镜。
-3. 像素级还原，严禁漏字或重复。
-4. 目标 25-35 字，严禁超过 35 字。
-输出格式：从编号 {current_shot_idx} 开始，仅输出编号列表。"""
+                results = []
+                current_idx = 1
+                prog = st.progress(0)
+                
+                for i, chunk in enumerate(chunks):
+                    with st.spinner(f"正在处理第 {i+1}/{len(chunks)} 任务块..."):
+                        prompt = f"""你是一个解说分镜搬运工。
+要求：
+1. 像素级还原原文，严禁增减、修改、重复、或润色！
+2. 每行字数严格在 25-35 字之间，超过必须切断。
+3. 对话切换、大动作必须换行。
+4. 编号从 {current_idx} 开始。
+待处理文本：
+{chunk}"""
 
                         response = client.chat.completions.create(
                             model=model_id,
-                            messages=[
-                                {"role": "system", "system_prompt": system_prompt},
-                                {"role": "user", "content": f"请对此段落进行视觉单元分镜：\n\n{chunk}"}
-                            ],
-                            temperature=0, 
+                            messages=[{"role": "system", "content": "直接输出分镜列表，严禁废话。"},
+                                      {"role": "user", "content": prompt}],
+                            temperature=0
                         )
                         chunk_res = response.choices[0].message.content.strip()
-                        full_result.append(chunk_res)
-                        last_nums = re.findall(r'(\d+)[\.、]', chunk_res)
-                        if last_nums:
-                            current_shot_idx = int(last_nums[-1]) + 1
-                        progress_bar.progress((idx + 1) / len(chunks))
-
-                st.session_state.storyboard_draft = "\n".join(full_result)
-                st.success("AI 分镜初稿生成完毕！请在下方进行人工精修。")
-
-            except Exception as e:
-                st.error(f"处理失败：{str(e)}")
-
-    # --- 逻辑 B：人工微调区 ---
-    if st.session_state.storyboard_draft:
-        st.divider()
-        st.subheader("✍️ 人工精修编辑器")
-        
-        col_edit, col_analyze = st.columns([2, 1])
-        
-        with col_edit:
-            # 用户在此处通过回车/删除进行编辑
-            edited_text = st.text_area(
-                "在此微调文案内容（按回车增加分镜，删除换行合并分镜）：", 
-                value=st.session_state.storyboard_draft, 
-                height=600,
-                key="editor"
-            )
-            
-            col_btn1, col_btn2 = st.columns(2)
-            if col_btn1.button("🔢 一键校准序号"):
-                st.session_state.storyboard_draft = reindex_storyboard(edited_text)
-                st.rerun()
+                        results.append(chunk_res)
+                        
+                        # 更新序号
+                        nums = re.findall(r'(\d+)[\.、]', chunk_res)
+                        if nums: current_idx = int(nums[-1]) + 1
+                        prog.progress((i+1)/len(chunks))
                 
-            if col_btn2.download_button("💾 下载最终分镜稿", st.session_state.storyboard_draft, "storyboard_final.txt"):
-                st.balloons()
+                st.session_state.final_storyboard = "\n".join(results)
+                st.success("分镜生成成功！")
+            except Exception as e:
+                st.error(f"处理出错：{str(e)}")
 
-        with col_analyze:
-            # 实时数据看板
-            pure_out = get_pure_text(st.session_state.storyboard_draft)
-            out_len = len(pure_out)
-            diff = out_len - input_len
-            
-            lines = [l for l in st.session_state.storyboard_draft.split('\n') if re.match(r'^\d+', l.strip())]
-            
-            st.metric("最终分镜总数", f"{len(lines)} 组")
-            st.metric("最终还原字数", f"{out_len} 字")
-            
-            if diff == 0: st.success("✅ 字数对齐")
-            else: st.error(f"❌ 字数偏差: {diff}")
-            
-            # 节奏列表预览
-            analysis_list = []
-            for i, line in enumerate(lines):
-                c = re.sub(r'^\d+[\.、]\s*', '', line)
-                analysis_list.append({"镜头": i+1, "长度": len(c), "状态": "✅" if len(c) <= 35 else "❌太长"})
-            st.dataframe(pd.DataFrame(analysis_list), height=400)
+# --- 7. 编辑与校准区 ---
+if st.session_state.final_storyboard:
+    st.divider()
+    st.subheader("✍️ 人工精修编辑器")
+    
+    col_left, col_right = st.columns([2, 1])
+    
+    with col_left:
+        # 编辑器
+        edited_area = st.text_area(
+            "可在下方手动增减内容（回车分镜，删除合并）：",
+            value=st.session_state.final_storyboard,
+            height=500,
+            key="story_editor"
+        )
+        
+        c1, c2 = st.columns(2)
+        if c1.button("🔢 校准所有分镜序号"):
+            st.session_state.final_storyboard = reindex_text(edited_area)
+            st.rerun()
+        
+        c2.download_button("💾 下载分镜脚本", st.session_state.final_storyboard, "storyboard.txt")
+
+    with col_right:
+        # 实时统计
+        processed_clean = get_pure_text(st.session_state.final_storyboard)
+        processed_len = len(processed_clean)
+        diff = processed_len - len(st.session_state.original_text_clean)
+        
+        lines = [l for l in st.session_state.final_storyboard.split('\n') if re.match(r'^\d+', l.strip())]
+        
+        st.metric("生成分镜总数", f"{len(lines)} 组")
+        st.metric("还原总字数", f"{processed_len} 字")
+        
+        if diff == 0:
+            st.success("✅ 字数完美对齐")
+        else:
+            st.error(f"❌ 字数偏差：{diff}")
+            st.caption("正数为内容重复/脑补，负数为漏字。")
+
+        # 节奏分析表
+        analysis = []
+        for i, line in enumerate(lines):
+            txt = re.sub(r'^\d+[\.、]\s*', '', line)
+            analysis.append({"镜": i+1, "字数": len(txt), "状态": "✅" if len(txt) <= 35 else "⚠️过长"})
+        st.dataframe(pd.DataFrame(analysis), height=300, use_container_width=True)
