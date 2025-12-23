@@ -5,81 +5,72 @@ import re
 import pandas as pd
 
 # 页面配置
-st.set_page_config(page_title="导演引擎 V11 - 视觉无损分镜", layout="wide")
+st.set_page_config(page_title="导演引擎 V12 - 剧情驱动分镜", layout="wide")
 
-# 自定义 CSS 提升 UI 质感
-st.markdown("""
-    <style>
-    .metric-box { border: 1px solid #e6e9ef; padding: 15px; border-radius: 10px; background-color: #f8f9fa; }
-    .stDataFrame { border: 1px solid #e6e9ef; }
-    </style>
-""", unsafe_allow_html=True)
-
-# --- 侧边栏配置 ---
+# 侧边栏配置
 with st.sidebar:
-    st.header("⚙️ 导演引擎配置")
+    st.header("🎬 导演引擎控制台")
     api_key = st.text_input("API Key", type="password")
     base_url = st.text_input("接口地址", value="https://blog.tuiwen.xyz/v1")
     model_id = st.text_input("Model ID", value="grok-4.1")
     
     st.divider()
     st.markdown("""
-    ### 🎬 V11 视觉切分准则：
-    1. **主语即镜头**：人称切换（如“我”转“他”）必须断开。
-    2. **动作即分镜**：一个核心动作完成后必须切换。
-    3. **对话独立性**：台词结束后动作描写严禁混在一起。
-    4. **硬性 35 字**：单行依然禁止超过 35 字。
+    ### 🎭 导演分镜准则：
+    1. **剧情驱动**：分析文本的【起、承、转、合】，在叙事重心偏移时切换镜头。
+    2. **动作闭环**：一个完整的动作描写（如：他翻身上马，扬长而去）视为一个镜头，不要从中掐断。
+    3. **对话逻辑**：对话人切换时必换镜头；若一人长篇大论，按其表达的【意思转折点】切换。
+    4. **节奏参考**：参考 30-40 字的语感节奏，但逻辑完整性高于字数限制。
     """)
-    max_chars = st.slider("硬性单镜字数限制", 10, 50, 35)
+    chunk_val = st.slider("处理窗口大小 (建议 1500)", 500, 3000, 1500)
 
-# --- 主界面 ---
-st.title("📊 视觉逻辑稽核面板")
+# 主界面
+st.title("🎥 剧情逻辑分镜系统")
 
-col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+if 'storyboard_data' not in st.session_state:
+    st.session_state.storyboard_data = []
+if 'raw_text_len' not in st.session_state:
+    st.session_state.raw_text_len = 0
 
-# 初始化 Session State
-if 'final_shots' not in st.session_state:
-    st.session_state.final_shots = []
-if 'raw_word_count' not in st.session_state:
-    st.session_state.raw_word_count = 0
-
-# --- 1. 上传逻辑 ---
-uploaded_file = st.file_uploader("选择本地 TXT 文件", type=['txt'])
+# 1. 文件上传
+uploaded_file = st.file_uploader("上传文案 (TXT)", type=['txt'])
 
 if uploaded_file:
     content = uploaded_file.read().decode("utf-8")
-    # 彻底去除段落，形成纯文字流
+    # 彻底清除原有干扰格式
     clean_text = "".join(content.split())
-    st.session_state.raw_word_count = len(clean_text)
+    st.session_state.raw_text_len = len(clean_text)
     
-    with st.expander("👁️ 预览待处理文本流"):
-        st.write(clean_text)
-
-    if st.button("🚀 启动视觉无损分镜"):
+    col_info, col_btn = st.columns([3, 1])
+    col_info.info(f"📄 文本解析成功 | 总字数：{st.session_state.raw_text_len} 字")
+    
+    if col_btn.button("🚀 开始逻辑分析并生成分镜"):
         if not api_key:
-            st.error("请先输入 API Key")
+            st.error("请填入 API Key")
         else:
-            # 策略：为了防止 7000 字长文被 AI 压缩，我们分段请求（每段约 800 字）
-            chunk_size = 800
-            chunks = [clean_text[i:i+chunk_size] for i in range(0, len(clean_text), chunk_size)]
+            # 采用较大的窗口，让AI有足够的剧情理解空间
+            chunks = [clean_text[i:i+chunk_val] for i in range(0, len(clean_text), chunk_val)]
             
-            all_processed_shots = []
-            progress_bar = st.progress(0)
+            all_shots = []
+            progress = st.progress(0)
             
             for idx, chunk in enumerate(chunks):
-                st.write(f"正在处理第 {idx+1}/{len(chunks)} 块数据...")
+                st.write(f"正在深度分析剧情第 {idx+1}/{len(chunks)} 块...")
                 
-                system_prompt = f"""你是一个好莱坞级别的电影分镜师。你的任务是将文本流【无损】转化为分镜脚本。
-                
-                硬性准则：
-                1. 严禁改动、删除、总结任何原文。输出的所有汉字必须与原文完全一致且顺序相同。
-                2. 逻辑分镜点（必须另起一行编号）：
-                   - 场景变化时。
-                   - 主语/角色切换时。
-                   - 动作发生转折或完成时。
-                   - 对话开始或结束时。
-                3. 每行长度限制：绝对不能超过 {max_chars} 个字。若原文一句话太长，请在语义停顿处强制切分。
-                4. 纯净输出：仅输出带有编号的分镜内容，严禁任何废话。
+                # 升级后的 Prompt：强调剧情理解，而非字数切分
+                system_prompt = """你是一位资深的电影解说导演，精通剧本结构分析。
+                你的任务是：将提供的文案流【无损】还原为逻辑严密的分镜脚本。
+
+                工作流要求：
+                1. 理解剧情：首先阅读整段文字，识别其中的角色、场景、核心动作。
+                2. 逻辑分镜：
+                   - 镜头切换点必须是：场景转移、角色互换、动作节奏变化、或情感转折处。
+                   - 严禁机械化切分！一个分镜应包含一个完整的“视觉信息块”。
+                3. 节奏控制：虽然不要死板限制字数，但请保持分镜文案在 20-45 字之间，以便后期配音与画面对齐。
+                4. 无损还原：绝对严禁删改、总结原文。每一句话、每一个字都必须按顺序出现在分镜中。
+                5. 格式：仅输出编号和内容，如：
+                1. 内容...
+                2. 内容...
                 """
                 
                 try:
@@ -88,58 +79,66 @@ if uploaded_file:
                         "model": model_id,
                         "messages": [
                             {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": f"请对以下文本流进行视觉切分：\n{chunk}"}
+                            {"role": "user", "content": f"请深度阅读并逻辑化分镜：\n{chunk}"}
                         ],
-                        "temperature": 0.1 # 极低随机性确保稳定性
+                        "temperature": 0.2 
                     }
                     response = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload)
                     chunk_result = response.json()['choices'][0]['message']['content']
                     
-                    # 提取编号后的内容
+                    # 使用更稳健的正则表达式提取内容
                     lines = re.findall(r'\d+[.、\s]+(.*)', chunk_result)
-                    all_processed_shots.extend(lines)
+                    if not lines: # 兜底逻辑
+                         lines = chunk_result.strip().split('\n')
+                    
+                    all_shots.extend([l.strip() for l in lines if l.strip()])
                     
                 except Exception as e:
-                    st.error(f"处理块 {idx} 时出错: {str(e)}")
+                    st.error(f"处理出错: {str(e)}")
                 
-                progress_bar.progress((idx + 1) / len(chunks))
+                progress.progress((idx + 1) / len(chunks))
             
-            st.session_state.final_shots = all_processed_shots
+            st.session_state.storyboard_data = all_shots
 
-# --- 2. 结果展示与稽核 ---
-if st.session_state.final_shots:
-    processed_text = "".join(st.session_state.final_shots)
-    processed_word_count = len(processed_text)
-    diff = processed_word_count - st.session_state.raw_word_count
+# 2. 结果可视化与稽核面板
+if st.session_state.storyboard_data:
+    # 数据计算
+    processed_text = "".join(st.session_state.storyboard_data)
+    processed_len = len(processed_text)
+    diff = processed_len - st.session_state.raw_text_len
     
-    # 更新顶部数据面板
-    col_m1.metric("原文总字数", f"{st.session_state.raw_word_count} 字")
-    col_m2.metric("生成分镜总数", f"{len(st.session_state.final_shots)} 组")
-    col_m3.metric("处理后总字数", f"{processed_word_count} 字")
-    col_m4.metric("偏差值", f"{diff} 字", delta=diff, delta_color="inverse")
-
+    # 顶部稽核数据卡片
     st.divider()
-    
-    c_left, c_right = st.columns([1, 1])
-    
-    with c_left:
-        st.subheader("🎬 视觉分镜编辑器 (无损还原)")
-        shot_content = ""
-        for i, shot in enumerate(st.session_state.final_shots):
-            shot_content += f"{i+1}. {shot}\n"
-        st.text_area("分镜正文", shot_content, height=600)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("原文总字数", f"{st.session_state.raw_text_len}")
+    c2.metric("生成分镜数", f"{len(st.session_state.storyboard_data)} 组")
+    c3.metric("处理后字数", f"{processed_len}")
+    c4.metric("偏差值", f"{diff} 字", delta=diff, delta_color="inverse")
 
-    with c_right:
-        st.subheader("📊 实时视觉节奏分析")
+    # 左右布局
+    col_left, col_right = st.columns([1, 1])
+    
+    with col_left:
+        st.subheader("📝 分镜正文预览")
+        # 允许用户在文本框微调
+        full_script = "\n".join([f"{i+1}. {s}" for i, s in enumerate(st.session_state.storyboard_data)])
+        st.text_area("分镜编辑器", full_script, height=600)
+
+    with col_right:
+        st.subheader("📊 视觉节奏监控")
         df = pd.DataFrame({
-            "序号": range(1, len(st.session_state.final_shots) + 1),
-            "内容预览": st.session_state.final_shots,
-            "长度": [len(s) for s in st.session_state.final_shots],
-            "状态": ["✅ 理想" if len(s) <= max_chars else "⚠️ 偏长" for s in st.session_state.final_shots]
+            "分镜序号": range(1, len(st.session_state.storyboard_data) + 1),
+            "文案内容": st.session_state.storyboard_data,
+            "字数": [len(s) for s in st.session_state.storyboard_data]
         })
-        st.dataframe(df, height=600, use_container_width=True)
         
-        avg_len = sum(len(s) for s in st.session_state.final_shots) / len(st.session_state.final_shots)
-        st.info(f"💡 平均每镜停留：{avg_len:.1f} 字 (约 {avg_len/7:.1f} 秒)")
+        # 这里的状态逻辑不再是简单的报错，而是“节奏评估”
+        def judge_rhythm(length):
+            if length < 10: return "⚡ 快节奏"
+            if 10 <= length <= 45: return "✅ 标准"
+            return "🐢 慢镜头/需手动切分"
 
-    st.download_button("导出无损分镜脚本", shot_content, file_name="director_script.txt")
+        df["建议状态"] = df["字数"].apply(judge_rhythm)
+        st.dataframe(df, height=550, use_container_width=True)
+        
+        st.download_button("💾 下载最终脚本", full_script, file_name="director_final_script.txt")
