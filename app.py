@@ -4,131 +4,124 @@ import io
 import re
 
 # --- 页面配置 ---
-st.set_page_config(page_title="半自动分镜工作站", layout="wide")
-
-st.title("🎬 电影解说·半自动分镜工作站")
-st.markdown("先由 AI 进行逻辑初分，再由你手动精修，最后 AI 自动重新编号。")
+st.set_page_config(page_title="极速分镜编辑器", layout="wide")
 
 # --- 初始化状态机 ---
 if 'step' not in st.session_state:
-    st.session_state.step = 1  # 1: 上传, 2: AI初分及人工精修, 3: 最终输出
-if 'draft_content' not in st.session_state:
-    st.session_state.draft_content = ""
-if 'final_content' not in st.session_state:
-    st.session_state.final_content = ""
+    st.session_state.step = 1 
+if 'editor_content' not in st.session_state:
+    st.session_state.editor_content = ""
+if 'final_numbered_content' not in st.session_state:
+    st.session_state.final_numbered_content = ""
+
+st.title("🎬 极速文案分镜编辑器")
+st.markdown("AI初分 -> 人工回车/合并 -> 自动编号")
 
 # --- 侧边栏配置 ---
 with st.sidebar:
-    st.title("⚙️ 配置")
-    api_key = st.text_input("API Key", type="password")
-    base_url = st.text_input("接口地址", value="https://blog.tuiwen.xyz/v1")
-    model_id = st.text_input("Model ID", value="gpt-4o")
+    st.title("⚙️ API 设置")
+    api_key = st.sidebar.text_input("请输入 API Key", type="password")
+    base_url = st.sidebar.text_input("接口地址", value="https://blog.tuiwen.xyz/v1")
+    model_id = st.sidebar.text_input("Model ID", value="gpt-4o")
     
+    st.divider()
     if st.button("🔄 开启新任务"):
-        st.session_state.step = 1
-        st.session_state.draft_content = ""
-        st.session_state.final_content = ""
+        for key in ['step', 'editor_content', 'final_numbered_content']:
+            st.session_state[key] = 1 if key == 'step' else ""
         st.rerun()
 
-# --- 辅助函数 ---
-def clean_text(text):
-    """消除所有原有段落"""
+# --- 逻辑处理函数 ---
+def flatten_text(text):
+    """彻底清除所有原有换行和空格，变成纯字符流"""
     text = text.replace("\n", "").replace("\r", "")
     text = re.sub(r'\s+', '', text)
     return text
 
-# --- 阶段 1：上传与初分 ---
+# --- 阶段 1：上传并进行“无编号”初分 ---
 if st.session_state.step == 1:
-    uploaded_file = st.file_uploader("上传文案 (.txt)", type=['txt'])
+    uploaded_file = st.file_uploader("第一步：选择本地 TXT 文案", type=['txt'])
     if uploaded_file:
         raw_text = io.StringIO(uploaded_file.getvalue().decode("utf-8")).read()
-        flat_text = clean_text(raw_text)
+        flat_text = flatten_text(raw_text)
         
-        st.info("已完成文本清洗，点击下方按钮由 AI 进行初步剧情拆解。")
-        if st.button("🚀 生成初版分镜 (Step 1)"):
+        if st.button("🚀 生成初步分镜"):
             if not api_key:
-                st.error("请输入 API Key")
+                st.error("请先输入 API Key")
             else:
                 try:
-                    with st.spinner("AI 正在解析剧情逻辑..."):
+                    with st.spinner("AI 正在根据剧情逻辑拆解分镜..."):
                         client = OpenAI(api_key=api_key, base_url=base_url)
+                        # 重要：强制 AI 不要输出编号
                         response = client.chat.completions.create(
                             model=model_id,
                             messages=[
-                                {"role": "system", "content": "你是一个电影分镜导演。请阅读以下没有段落的文字流，按照视觉剧情进行分镜。每行一个分镜，以'数字.'开头。严禁漏字，严禁改字。"},
-                                {"role": "user", "content": flat_text}
+                                {"role": "system", "content": """你是一个专业的电影分镜导演。
+                                任务：阅读文字流，根据剧情逻辑进行分镜。
+                                要求：
+                                1. 每个分镜占一行（即在分镜处换行）。
+                                2. 严禁输出任何数字编号、符号、前缀。
+                                3. 严禁修改、遗漏、添加原文任何文字。
+                                4. 只输出纯文案换行后的结果。"""},
+                                {"role": "user", "content": f"请对以下文案进行逻辑换行：\n\n{flat_text}"}
                             ],
                             temperature=0.3
                         )
-                        st.session_state.draft_content = response.choices[0].message.content
+                        st.session_state.editor_content = response.choices[0].message.content
                         st.session_state.step = 2
                         st.rerun()
                 except Exception as e:
-                    st.error(f"出错：{e}")
+                    st.error(f"处理失败：{e}")
 
-# --- 阶段 2：人工精修 ---
+# --- 阶段 2：人工极速编辑 (回车拆分/退格合并) ---
 elif st.session_state.step == 2:
-    st.subheader("✍️ 人工精修区")
-    st.markdown("""
-    **操作指南：**
-    - **合并分镜**：删除换行符，让两段话合并到一行。
-    - **拆分分镜**：在需要断开的地方按下回车键。
-    - **字数参考**：你可以自由控制每行长度，AI 稍后会自动重新编号。
-    """)
+    st.subheader("✍️ 人工精修 (回车拆分 / 退格合并)")
+    st.info("💡 操作提示：AI 已为你做了初步换行。现在你可以：在需要分段处按【Enter回车】，在需要合并处按【Backspace退格】。无需管数字。")
     
-    # 用户在这里手动编辑
+    # 纯净的编辑区
     user_edited = st.text_area(
-        "请在此直接修改文案分段（无需担心数字编号，重点关注在哪里分镜）：",
-        value=st.session_state.draft_content,
-        height=500
+        "分镜编辑窗口",
+        value=st.session_state.editor_content,
+        height=500,
+        label_visibility="collapsed"
     )
     
-    if st.button("✅ 我已完成精修，生成最终编号 (Step 2)"):
-        st.session_state.draft_content = user_edited
+    if st.button("✅ 调整好了，生成最终编号"):
+        st.session_state.editor_content = user_edited
         try:
-            with st.spinner("正在重新格式化并排序..."):
+            with st.spinner("正在自动编号并校验..."):
                 client = OpenAI(api_key=api_key, base_url=base_url)
-                # 第二遍分镜的 Prompt：极其严格的重排序指令
+                # 第三步：只负责数行数并加编号
                 response = client.chat.completions.create(
                     model=model_id,
                     messages=[
-                        {"role": "system", "content": """你是一个严格的文案格式化助手。
-                        你的唯一任务是：
-                        1. 接收用户精修后的文本。
-                        2. 按照用户现在的分段（换行符），重新从 1 开始进行数字编号。
-                        3. **绝对严禁**合并用户已经分开的行，也**绝对严禁**拆分用户已经合并的行。
-                        4. **绝对严禁**修改、增加或删除原文中的任何一个字。
-                        5. 确保每行格式为：'数字.内容'。"""},
+                        {"role": "system", "content": """你是一个严格的编号助手。
+                        任务：接收文本，在每一行开头加上数字编号（如 1. 2. 3.）。
+                        要求：
+                        1. 严格按照用户现在的换行位置，一行就是一个编号。
+                        2. 绝对不能合并行，绝对不能拆分行。
+                        3. 绝对不能更改原文任何字。"""},
                         {"role": "user", "content": user_edited}
                     ],
-                    temperature=0.1 # 极低随机性，确保不自作聪明
+                    temperature=0.1
                 )
-                st.session_state.final_content = response.choices[0].message.content
+                st.session_state.final_numbered_content = response.choices[0].message.content
                 st.session_state.step = 3
                 st.rerun()
         except Exception as e:
-            st.error(f"排序出错：{e}")
+            st.error(f"编号失败：{e}")
 
-# --- 阶段 3：最终结果与下载 ---
+# --- 阶段 3：最终产出 ---
 elif st.session_state.step == 3:
-    st.subheader("🎬 最终分镜定稿")
+    st.subheader("🎬 最终分镜稿")
+    st.text_area("最终结果", st.session_state.final_numbered_content, height=500)
     
-    # 展示并允许最后查看
-    st.text_area("最终分镜内容", st.session_state.final_content, height=500)
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.download_button(
-            "📥 下载最终分镜 TXT",
-            st.session_state.final_content,
-            file_name="最终分镜稿.txt",
-            use_container_width=True
-        )
-    with col2:
-        if st.button("⬅️ 返回修改", use_container_width=True):
+    c1, c2 = st.columns(2)
+    with c1:
+        st.download_button("📥 下载分镜 TXT", st.session_state.final_numbered_content, file_name="分镜结果.txt")
+    with c2:
+        if st.button("⬅️ 回去微调"):
             st.session_state.step = 2
             st.rerun()
 
-# --- 界面增强 ---
 st.divider()
-st.caption("流程：1. AI 暴力拆解剧情 -> 2. 人类直觉微调分段 -> 3. AI 重新对齐编号。")
+st.caption("2025 AI文案分镜工具 · 逻辑：强制去段落 -> 视觉逻辑初分 -> 人工自由剪辑 -> 自动编号排版")
