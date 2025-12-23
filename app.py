@@ -3,122 +3,109 @@ from openai import OpenAI
 import re
 
 # 页面配置
-st.set_page_config(page_title="AI 电影解说深度分镜工具", page_icon="🎬", layout="wide")
+st.set_page_config(page_title="电影解说精细化分镜工具", page_icon="🎬", layout="wide")
 
-st.title("🎬 电影解说文案深度分镜工具")
-st.markdown("""
-**核心逻辑更新：**
-1. **强制重构**：程序会自动抹除原文的所有段落格式，迫使 AI 必须通过阅读理解来重新分镜。
-2. **两步审核**：先进行剧情逻辑拆解，再进行节奏与字数平滑优化。
-""")
+st.title("🎬 电影解说文案精细化分镜")
+st.markdown("本版本强化了第二遍的**‘强制拆分逻辑’**，确保长文案被精确切分为 5 秒内可消化的分镜。")
 
 # --- 侧边栏配置 ---
 st.sidebar.header("⚙️ API 与模型设置")
 api_key = st.sidebar.text_input("请输入 API Key", type="password")
 base_url = st.sidebar.text_input("中转接口地址", value="https://blog.tuiwen.xyz/v1")
 
-# 允许用户选择或输入 Model ID
-model_options = [
-    "deepseek-chat", 
-    "gpt-4o", 
-    "claude-3-5-sonnet-20240620", 
-    "gemini-1.5-pro", 
-    "grok-2",
-    "doubao-pro-128k"
-]
-selected_model = st.sidebar.selectbox("选择或输入模型名称 (Model ID)", model_options + ["手动输入自定义 ID"])
-if selected_model == "手动输入自定义 ID":
-    model_id = st.sidebar.text_input("请输入自定义 Model ID", value="deepseek-chat")
+model_options = ["deepseek-chat", "gpt-4o", "claude-3-5-sonnet-20240620", "gemini-1.5-pro", "doubao-pro-128k"]
+selected_model = st.sidebar.selectbox("选择或输入模型名称 (Model ID)", model_options + ["手动输入"])
+if selected_model == "手动输入":
+    model_id = st.sidebar.text_input("请输入自定义 Model ID")
 else:
     model_id = selected_model
 
-# --- 核心 Prompt 定义 ---
+# --- 核心 Prompt 深度优化 ---
 
-# 第一阶段：剥离格式后的深度剧情解析
-PROMPT_STAGE_1 = """你是一个顶级的电影剪辑师和分镜师。
-我会给你一段没有任何换行符的连续文本。请你深度阅读这段文字，根据剧情逻辑进行初步分镜。
-
-分镜标准（优先级排序）：
-1. 场景切换：从室内到室外，或从地点A到地点B，必须分镜。
-2. 动作/视线改变：角色做一个大幅度动作，或视线转向，必须分镜。
-3. 角色对话：不同角色说话，必须分镜。
-4. 叙述节奏：当叙述重点发生位移时，必须分镜。
-
-严格要求：
-- 严禁删除、添加或改动原文中任何一个字。
-- 不要理会原文可能的格式，完全基于你对剧情的理解划分。
-- 格式：数字序号.内容
+# 第一阶段：宏观剧情拆解（粗剪）
+PROMPT_STAGE_1 = """你是一个电影分镜导演。
+我会给你一段没有任何换行符的文案。请基于【场景变换、人物对话、重大动作】进行第一次逻辑分镜。
+要求：
+1. 识别故事的转场和情节转折点。
+2. 严禁改动原文任何字词。
+3. 此时不需要过度考虑字数，重点是保证剧情逻辑的完整性。
+格式：序号.内容
 """
 
-# 第二阶段：节奏平滑与最终对齐校对
-PROMPT_STAGE_2 = """你是一个专业的电影后期统筹。
-请对初版分镜脚本进行优化校对：
-1. 检查遗漏：对照提供的原始全文，确保分镜后的内容没有遗漏任何一个字。
-2. 节奏优化：如果某个分镜的文字过长（例如超过 50 个字），请在不破坏语意的前提下，寻找合适的逻辑停顿点将其拆分为两个相连的分镜，以适应视频5-8秒的画面停留时间。
-3. 逻辑自由度：不要死板地限制在35字，只要分镜逻辑合理且方便画面对齐，40-50字也是允许的。
-4. 最终输出：仅输出最终的分镜列表，格式为“序号.文案内容”。
+# 第二阶段：微观节奏精修（精剪） - 这是核心改动
+PROMPT_STAGE_2 = """你是一个分秒必争的电影剪辑精修师。
+你的任务是拿着第一步生成的“粗剪分镜”，进行【微观二次拆解】。
+
+操作准则：
+1. **强制扫描长度**：盯着每一个分镜。如果该分镜的字数超过 30 个汉字，说明一个画面放不下，你必须将其拆分为 2 个或多个连续分镜。
+2. **寻找微小停顿点**：拆分长分镜时，请寻找逻辑上的微小间隙，例如：
+   - 标点符号处（逗号、分号）。
+   - 关联词处（“然后”、“接着”、“但是”）。
+   - 动作的起承转合（例如：“他跑进屋子/反手锁上了门”）。
+3. **连贯性要求**：拆分后的内容必须像电影画面一样丝滑切换。
+4. **严禁丢失字词**：你只是在做“切分”手术，不准修改、不准删除、不准增加任何一个字。
+5. **拒绝懒惰**：不要原样输出第一步的结果。你的价值就在于把长句切成短镜头，使其完美适配 5 秒一个镜头的节奏。
+
+输出：最终优化后的完整分镜列表，仅保留“序号.内容”格式。
 """
 
 # --- 主界面逻辑 ---
-uploaded_file = st.file_uploader("选择本地 TXT 文案文件", type=['txt'])
+uploaded_file = st.file_uploader("上传 TXT 文案", type=['txt'])
 
 if uploaded_file is not None:
-    # 1. 读取并清洗文本（去掉所有换行，防止 AI 偷懒沿用旧格式）
+    # 彻底抹除原段落
     raw_content = uploaded_file.getvalue().decode("utf-8")
-    cleaned_content = re.sub(r'\s+', '', raw_content) # 抹除所有空格、换行、制表符
+    cleaned_content = "".join(raw_content.split()) # 强力去除所有空白字符
     
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("📦 AI 获取的原始输入")
-        st.info("系统已自动抹除所有段落格式，强制 AI 进行逻辑解析。")
-        st.text_area("清洗后的文本 (流式)", cleaned_content, height=300)
+    col_input, col_s1, col_s2 = st.columns([1, 1, 1])
+    
+    with col_input:
+        st.subheader("1. 抹除格式的原文")
+        st.text_area("Input", cleaned_content, height=400)
 
-    if st.button("🚀 开始深度逻辑分镜"):
+    if st.button("🚀 执行双重精细分镜"):
         if not api_key:
-            st.error("请先在侧边栏输入 API Key！")
+            st.error("请输入 API Key")
         else:
             client = OpenAI(api_key=api_key, base_url=base_url)
             
             try:
-                # --- 第一阶段：初次剧情拆解 ---
-                with st.spinner("阶段 1/2：正在深度解析剧情逻辑..."):
+                # --- 第一阶段 ---
+                with st.spinner("阶段 1：剧情粗剪中..."):
                     res1 = client.chat.completions.create(
                         model=model_id,
                         messages=[
                             {"role": "system", "content": PROMPT_STAGE_1},
-                            {"role": "user", "content": f"请对以下连续文本进行深度分镜：\n\n{cleaned_content}"}
+                            {"role": "user", "content": cleaned_content}
                         ],
-                        temperature=0.4 # 适中温度，允许 AI 对剧情有理解空间
+                        temperature=0.3
                     )
                     stage1_result = res1.choices[0].message.content
                 
-                # --- 第二阶段：节奏校对与防遗漏 ---
-                with st.spinner("阶段 2/2：正在进行字数校对与节奏平滑..."):
+                with col_s1:
+                    st.subheader("2. 剧情初次分镜")
+                    st.text_area("Stage 1", stage1_result, height=400)
+                
+                # --- 第二阶段 ---
+                with st.spinner("阶段 2：字数精剪与强制拆分..."):
                     res2 = client.chat.completions.create(
                         model=model_id,
                         messages=[
                             {"role": "system", "content": PROMPT_STAGE_2},
-                            {"role": "user", "content": f"原始全文：\n{cleaned_content}\n\n初版分镜：\n{stage1_result}"}
+                            {"role": "user", "content": f"初次分镜如下，请执行强制精修：\n\n{stage1_result}"}
                         ],
-                        temperature=0.2 # 较低温度，确保严谨和不遗漏
+                        temperature=0.1 # 调低温度，让它极其严格地执行拆分
                     )
                     final_result = res2.choices[0].message.content
                 
-                st.success("✨ 分镜处理完成！")
-                with col2:
-                    st.subheader("🎬 最终分镜脚本")
-                    st.text_area("Final Output", final_result, height=450)
+                with col_s2:
+                    st.subheader("3. 最终对齐分镜")
+                    st.text_area("Final Output", final_result, height=400)
+                    st.download_button("下载结果", final_result, file_name="final_storyboard.txt")
                     
-                    st.download_button(
-                        label="📥 下载最终分镜脚本",
-                        data=final_result,
-                        file_name=f"深度分镜_{uploaded_file.name}",
-                        mime="text/plain"
-                    )
-
             except Exception as e:
-                st.error(f"发生错误：{str(e)}")
+                st.error(f"处理失败: {str(e)}")
 
-# --- 底部贴士 ---
+# --- 说明 ---
 st.markdown("---")
-st.caption("注：如果模型响应较慢，请检查中转接口的稳定性。推荐使用 Claude-3.5-Sonnet 或 GPT-4o 进行此类深层逻辑分析。")
+st.info("**为什么这次会有效？**\n\n我们将第二遍的任务从‘校对’改成了‘切分’。AI 现在被告知：如果你不拆分超过30个字的分镜，你就是失职的。这种强度的指令能迫使它去分析长句内部的结构。")
