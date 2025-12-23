@@ -3,58 +3,75 @@ from openai import OpenAI
 import re
 import pandas as pd
 
-# --- 核心工具函数 ---
+# --- 核心工具函数：智能语义拆分 ---
+def smart_chunk_text(text, max_chars=1200):
+    """寻找句号或换行符进行智能切分，防止语义断裂"""
+    chunks = []
+    while len(text) > max_chars:
+        # 在截断点附近找最后一个句号、感叹号或问号
+        split_index = -1
+        for mark in ["。", "！", "？", "\n"]:
+            pos = text.rfind(mark, 0, max_chars)
+            split_index = max(split_index, pos)
+        
+        # 如果没找到标点，就强行截断
+        if split_index == -1:
+            split_index = max_chars
+        else:
+            split_index += 1 # 包含标点符号本身
+            
+        chunks.append(text[:split_index])
+        text = text[split_index:]
+    chunks.append(text)
+    return chunks
+
 def get_pure_text(text):
-    """极致纯净提取，用于对账"""
+    """提取纯文本内容，用于精确对账"""
     text = re.sub(r'\d+[\.、]\s*', '', text)
     return "".join(text.split())
 
-def chunk_text(text, chunk_size=1200):
-    """将超长文拆分成小块，防止AI中断和幻觉"""
-    return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
-
 # --- 页面配置 ---
-st.set_page_config(page_title="全能分镜导演 V9-长文无损版", layout="wide")
+st.set_page_config(page_title="解说分镜导演 V10-万能适配版", layout="wide")
 
-st.sidebar.title("⚙️ 导演引擎配置")
+st.sidebar.title("⚙️ 核心引擎配置")
 api_key = st.sidebar.text_input("1. API Key", type="password")
 base_url = st.sidebar.text_input("2. 接口地址", value="https://blog.tuiwen.xyz/v1")
 model_id = st.sidebar.text_input("3. Model ID", value="gpt-4o")
 
 st.sidebar.divider()
-st.sidebar.warning("""
-**🎞️ V9 工业级准则：**
-1. **自动分段处理**：解决长文中断问题。
-2. **35字强硬死线**：单行必断，严禁超标。
-3. **镜像零损**：严禁重复，严禁漏字。
+st.sidebar.success("""
+**🎞️ V10 核心升级点：**
+1. **智能分块**：按句号切割，解决幻觉重复。
+2. **长句重构**：优化长难句的分镜逻辑。
+3. **万能适配**：不再局限于特定题材，适配全网文案。
 """)
 
 # --- 主界面 ---
-st.title("🎞️ 全能文案·工业级无损分镜系统")
-st.caption("针对超长文案（4000字+）优化，解决幻觉重复、中途断更、分镜过长问题。")
+st.title("🎞️ 全能文案·工业级分镜系统 (V10)")
+st.caption("版本 10.0 | 解决分段重复、语义理解不足、字数溢出问题。")
 
-uploaded_file = st.file_uploader("📂 上传长文案 (.txt)", type=['txt'])
+uploaded_file = st.file_uploader("📂 上传文案文件 (.txt)", type=['txt'])
 
 if uploaded_file is not None:
     raw_text = uploaded_file.getvalue().decode("utf-8")
     input_stream = "".join(raw_text.split())
     input_len = len(input_stream)
 
-    st.subheader("📊 逻辑稽核面板")
+    st.subheader("📊 文案逻辑稽核面板")
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("原文总字数", f"{input_len} 字")
 
-    if st.button("🚀 开启无损分段分镜处理"):
+    if st.button("🚀 启动语义无损分镜"):
         if not api_key:
-            st.error("请填入 API Key")
+            st.error("请配置 API Key")
         else:
             try:
                 actual_base = base_url.split('/chat')[0].strip()
                 client = OpenAI(api_key=api_key, base_url=actual_base)
                 
-                # 步骤 1：分段
-                chunks = chunk_text(input_stream)
-                st.write(f"📦 检测到长文本，已自动拆分为 {len(chunks)} 个任务块并行处理...")
+                # 步骤 1：智能分块
+                chunks = smart_chunk_text(input_stream)
+                st.write(f"📦 已根据语义锚点拆分为 {len(chunks)} 个任务块，正在逐块分析...")
                 
                 full_result = []
                 current_shot_idx = 1
@@ -62,27 +79,25 @@ if uploaded_file is not None:
                 progress_bar = st.progress(0)
                 
                 for idx, chunk in enumerate(chunks):
-                    with st.spinner(f'正在处理第 {idx+1}/{len(chunks)} 块内容...'):
-                        # --- V9 镜像聚合 Prompt ---
-                        system_prompt = f"""你是一个电影解说分镜师，负责将文本流无损地转换为分镜。
-                        
-【绝对准则】：
-1. **镜像还原**：你只是一个搬运工，严禁删减、修改、润色或总结原文！一个字都不能多，一个字都不能少！
-2. **35字硬性截断**：单个分镜（一行）的内容字数必须控制在 20-35 字之间。绝对严禁超过 35 字！
-3. **拒绝重复**：严格按照输入顺序处理，严禁在不同分镜中重复出现相同的句子。
-4. **聚合逻辑**：
-   - 寻找自然的标点符号（，。！？）作为优先切分点。
-   - 如果几个短句合并后未超过 35 字，必须合并以保持解说节奏。
-   - 如果原句太长，必须强行在逻辑点切开。
+                    with st.spinner(f'正在分析第 {idx+1}/{len(chunks)} 块语义...'):
+                        # --- V10 万能导演 Prompt ---
+                        system_prompt = f"""你是一个顶级的解说导演。任务：将文本流转换为适合5秒画面的分镜脚本。
 
-【输出格式】：
-从编号 {current_shot_idx} 开始编号。直接输出编号列表。"""
+【绝对准则】：
+1. **0 字偏差提取**：你必须按照原文顺序，逐字逐句进行搬运，严禁自行添加任何润色词、引导词或重复前一段的内容。
+2. **35字黄金律**：单行字数必须在 20-35 字之间。若原句过长（如超过35字），必须在逻辑转折处拆分为两行。
+3. **语义聚合（拒绝碎镜）**：严禁无意义的超短句。如果一句话不到 15 字，必须与后文合并。
+4. **长句处理逻辑**：遇到描述性的长句（如“限她三天之内交出来...”），要根据视觉动作的连贯性进行分行，保证配音与画面的平衡感。
+5. **万能适配**：无视题材，核心目标是“字数填满”与“动作完整”。
+
+【输出要求】：
+从编号 {current_shot_idx} 开始输出。严禁任何前言或总结词。"""
 
                         response = client.chat.completions.create(
                             model=model_id,
                             messages=[
                                 {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": f"请处理以下文本段落：\n\n{chunk}"}
+                                {"role": "user", "content": f"请对此文本段落进行分镜（绝对禁止重复前文）：\n\n{chunk}"}
                             ],
                             temperature=0, 
                         )
@@ -90,50 +105,51 @@ if uploaded_file is not None:
                         chunk_res = response.choices[0].message.content
                         full_result.append(chunk_res)
                         
-                        # 更新下一个块的起始编号
-                        last_idx_match = re.findall(r'(\d+)[\.、]', chunk_res)
-                        if last_idx_match:
-                            current_shot_idx = int(last_idx_match[-1]) + 1
+                        # 动态更新编号
+                        last_nums = re.findall(r'(\d+)[\.、]', chunk_res)
+                        if last_nums:
+                            current_shot_idx = int(last_nums[-1]) + 1
                         
                         progress_bar.progress((idx + 1) / len(chunks))
 
-                # 合并结果
+                # 最终拼接与统计
                 final_result = "\n".join(full_result)
                 output_stream = get_pure_text(final_result)
                 output_len = len(output_stream)
                 
-                # 行分析
                 lines = [l.strip() for l in final_result.split('\n') if re.match(r'^\d+', l.strip())]
                 count = len(lines)
                 
+                # 数据分析
                 analysis_data = []
                 for i, line in enumerate(lines):
                     content = re.sub(r'^\d+[\.、]\s*', '', line)
                     ln = len(content)
-                    status = "✅ 理想" if 20 <= ln <= 35 else "❌ 不佳"
-                    analysis_data.append({"序号": i+1, "预览": content, "长度": ln, "状态": status})
+                    status = "✅ 理想" if 20 <= ln <= 35 else "⚠️ 调整"
+                    analysis_data.append({"序号": i+1, "预览": content[:20], "字数": ln, "状态": status})
                 df = pd.DataFrame(analysis_data)
 
                 # 更新看板
                 m2.metric("生成分镜总数", f"{count} 组")
-                m3.metric("还原字_纯净", f"{output_len} 字")
+                m3.metric("最终还原字数", f"{output_len} 字")
                 diff = output_len - input_len
-                m4.metric("偏差值", f"{diff} 字")
+                m4.metric("字数偏差", f"{diff} 字")
 
                 st.divider()
 
-                # 展示
-                c_a, c_b = st.columns([1.5, 1])
+                # UI 展示
+                c_a, c_b = st.columns([2, 1])
                 with c_a:
-                    st.subheader("📝 分镜结果预览 (无损版)")
-                    if diff == 0: st.success("🎉 字数 100% 对齐，已处理至结局！")
-                    else: st.warning(f"⚠️ 偏差：{diff} 字。请检查段落接缝处是否有多余文字。")
-                    st.text_area("分镜编辑器", value=final_result, height=800)
+                    st.subheader("📝 深度分镜编辑器 (无损还原)")
+                    if diff == 0: st.success("✅ 100% 像素级对齐")
+                    else: st.warning(f"偏差值 {diff}：通常源于标点转换或极个别重复，请检查段落交界处。")
+                    st.text_area("分镜脚本正文", value=final_result, height=600)
 
                 with c_b:
                     st.subheader("📊 节奏节奏实时分析")
                     st.dataframe(df, use_container_width=True)
-                    st.download_button("💾 下载全本分镜稿", final_result, "storyboard_v9.txt")
+                    st.metric("平均每镜停留", f"{output_len/count:.1f} 字")
+                    st.download_button("💾 下载最终分镜稿", final_result, "V10_Final.txt")
 
             except Exception as e:
-                st.error(f"处理失败：{str(e)}")
+                st.error(f"处理出错：{str(e)}")
