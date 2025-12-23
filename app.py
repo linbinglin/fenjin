@@ -2,162 +2,153 @@ import streamlit as st
 from openai import OpenAI
 import re
 import pandas as pd
-import math
+import string
 
 # --- 页面基础配置 ---
 st.set_page_config(
-    page_title="全能文案·电影感分镜系统 (V11)",
+    page_title="导演引擎 V12 (无损旗舰版)",
     page_icon="🎬",
     layout="wide"
 )
 
-# --- 自定义 CSS (为了还原截图中的专业感) ---
+# --- 自定义 CSS (导演级黑深色模式适配) ---
 st.markdown("""
 <style>
-    .metric-container {
+    .metric-box {
         background-color: #f0f2f6;
-        padding: 10px;
-        border-radius: 5px;
+        padding: 15px;
+        border-radius: 8px;
+        border-left: 5px solid #ff4b4b;
         margin-bottom: 20px;
     }
-    .stDataFrame { width: 100%; }
+    .stProgress > div > div > div > div {
+        background-color: #ff4b4b;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 侧边栏：参数配置 ---
+# --- 侧边栏 ---
 with st.sidebar:
-    st.header("⚙️ 导演引擎 V11")
+    st.header("⚙️ 导演引擎 V12")
+    st.caption("旗舰版：智能纠错 + 视觉重音切分")
     
-    api_key = st.text_input("API Key", type="password", placeholder="sk-xxxxxxxx")
+    api_key = st.text_input("API Key", type="password", placeholder="sk-...")
     base_url = st.text_input("接口地址", value="https://blog.tuiwen.xyz/v1")
     
-    # 模型选择
-    model_options = ["gpt-4o", "deepseek-chat", "claude-3-5-sonnet-20240620", "grok-beta", "gpt-3.5-turbo"]
+    model_options = ["gpt-4o", "deepseek-chat", "claude-3-5-sonnet-20240620", "gpt-4-turbo", "gpt-3.5-turbo"]
     selected_model = st.selectbox("Model ID", model_options, index=0)
     
-    if st.checkbox("手动输入模型ID"):
-        model_id = st.text_input("自定义ID", value=selected_model)
+    if st.checkbox("自定义模型ID"):
+        model_id = st.text_input("输入ID", value=selected_model)
     else:
         model_id = selected_model
 
+    st.divider()
+    st.markdown("### 🎬 V12 视觉切分逻辑")
     st.info("""
-    **📋 V11 视觉切分准则：**
-    1. **主语即镜头**：人称切换必须切镜。
-    2. **动作即分镜**：动作完成必须切镜。
-    3. **硬性35字**：单行禁止超过35字。
+    1. **情绪重音**：如“日复一日”、“恨不得”等情绪词单独成镜。
+    2. **动作拆解**：一个动作（推倒）+ 一个反应（看着）= 两个分镜。
+    3. **零损耗**：忽略标点差异，严查文字丢失。
     """)
 
-# --- 核心工具函数 ---
+# --- 核心逻辑函数 ---
 
 def clean_text_for_ai(text):
-    """预处理：去除换行，变成纯文本流"""
+    """预处理：去格式，变纯文本"""
     return text.replace("\n", "").replace("\r", "").strip()
 
-def smart_split_text(text, chunk_size=800):
+def normalize_text_for_comparison(text):
     """
-    智能分段：按句号/标点切分，避免截断句子。
-    将长文本切分为多个 chunk，每个约 chunk_size 字。
+    清洗文本以便进行【内容级】比对。
+    去除所有标点符号、空格、换行、数字序号。
+    只保留纯汉字/英文单词。
     """
-    chunks = []
-    current_chunk = ""
+    # 去除常见的中文标点和英文标点
+    punctuation = r"""!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~“”？，！【】（）、。：；’‘……"""
+    translator = str.maketrans('', '', punctuation)
     
-    # 简单的按句切分逻辑
+    # 1. 去除序号 (1. 或 100.)
+    text = re.sub(r'\d+[.、]', '', text)
+    # 2. 去除换行和空格
+    text = re.sub(r'\s+', '', text)
+    # 3. 去除标点
+    text = text.translate(translator)
+    return text
+
+def smart_split_text(text, chunk_size=1000):
+    """
+    更智能的分块：按句号切分，每块约1000字。
+    """
     sentences = re.split(r'([。！？])', text)
+    chunks = []
+    current = ""
     
-    # 重新组合
-    temp_sentences = []
+    # 重新拼接
+    temp = []
     for i in range(0, len(sentences)-1, 2):
-        temp_sentences.append(sentences[i] + sentences[i+1])
+        temp.append(sentences[i] + sentences[i+1])
     if len(sentences) % 2 == 1:
-        temp_sentences.append(sentences[-1])
+        temp.append(sentences[-1])
         
-    for sentence in temp_sentences:
-        if len(current_chunk) + len(sentence) > chunk_size:
-            chunks.append(current_chunk)
-            current_chunk = sentence
+    for s in temp:
+        if len(current) + len(s) > chunk_size:
+            chunks.append(current)
+            current = s
         else:
-            current_chunk += sentence
-            
-    if current_chunk:
-        chunks.append(current_chunk)
-    
+            current += s
+    if current:
+        chunks.append(current)
     return chunks
 
-def parse_storyboard_to_df(full_text):
-    """
-    将分镜文本解析为 DataFrame，用于右侧表格展示
-    """
-    lines = full_text.strip().split('\n')
+def parse_df(full_text):
+    """生成右侧分析表格数据"""
+    lines = full_text.split('\n')
     data = []
-    index_counter = 1
-    
-    for line in lines:
-        line = line.strip()
-        if not line: continue
-        
-        # 去除开头的序号 (比如 "1. xxx" -> "xxx")
-        content = re.sub(r'^\d+[.、]\s*', '', line)
-        
-        length = len(content)
-        status = "✅ 理想" if length <= 35 else "⚠️ 过长"
+    for i, line in enumerate(lines):
+        if not line.strip(): continue
+        # 清洗序号，获取纯内容
+        clean_content = re.sub(r'^\d+[.、]\s*', '', line)
+        length = len(clean_content)
+        # 状态判断
+        if length > 35: status = "⚠️ 拥挤"
+        elif length < 5: status = "⚡ 快切"
+        else: status = "✅ 完美"
         
         data.append({
-            "序号": index_counter,
-            "内容预览": content,
-            "长度": length,
-            "状态": status
+            "序号": i+1,
+            "分镜内容": clean_content,
+            "字数": length,
+            "视觉节奏": status
         })
-        index_counter += 1
-        
     return pd.DataFrame(data)
 
-def get_system_prompt():
-    return """
-    你是一个专业的电影解说分镜师。
-    任务：将提供的文本按视觉逻辑拆解为分镜脚本。
-    
-    【核心规则】：
-    1. **绝对忠实**：严禁删减原文，严禁增加原文没有的词。
-    2. **分镜逻辑**：
-       - 角色切换 -> 换行
-       - 场景/时间切换 -> 换行
-       - 动作/画面改变 -> 换行
-    3. **长度风控**：
-       - 每一行代表约5秒画面。
-       - **强制**：如果一句话超过35个字，必须在语义连贯处强制换行。
-    
-    【输出格式】：
-    不输出任何前言后语，只输出分镜内容，每行一句。
-    （不需要你自己标数字序号，直接输出文本行即可，系统会自动编号）
-    """
+# --- 主程序 ---
+st.title("🎬 导演引擎 V12 (无损还原版)")
 
-# --- 主界面逻辑 ---
-
-st.title("🎬 全能文案·电影感分镜系统 (V11)")
-
-# 1. 上传区域
-uploaded_file = st.file_uploader("📂 选择 TXT 文案", type=['txt'])
+# 1. 上传
+uploaded_file = st.file_uploader("📂 第一步：上传剧本 TXT", type=['txt'])
 
 if uploaded_file:
-    raw_content = uploaded_file.read().decode("utf-8")
-    flat_content = clean_text_for_ai(raw_content)
-    input_len = len(flat_content)
+    raw = uploaded_file.read().decode("utf-8")
+    flat_input = clean_text_for_ai(raw)
+    input_len_display = len(flat_input)
     
-    # 计算需要分多少段 (模仿图2)
-    chunks = smart_split_text(flat_content, chunk_size=800) # 800字一段，防止AI过载
+    # 纯净版长度（用于比对，不含标点）
+    input_pure_len = len(normalize_text_for_comparison(flat_input))
+    
+    chunks = smart_split_text(flat_input)
     total_chunks = len(chunks)
 
-    # 顶部仪表盘 (静态)
-    st.markdown("### 📊 视觉逻辑稽核面板")
-    st.metric("原文总字数", f"{input_len} 字")
+    # 状态栏
+    col1, col2, col3 = st.columns(3)
+    col1.metric("原文总字数", f"{input_len_display}")
+    col2.metric("剧情切片数", f"{total_chunks} 块")
     
-    if total_chunks > 1:
-        st.info(f"📁 已识别 {total_chunks} 个独立剧情块，正在进行视觉单元规划...")
-    
-    # 2. 启动按钮
-    if st.button("🚀 启动视觉无损分镜", type="primary"):
+    # 2. 生成
+    st.markdown("---")
+    if st.button("🚀 启动 V12 导演引擎", type="primary"):
         if not api_key:
-            st.error("请配置 API Key")
+            st.error("请先配置 API Key")
         else:
             client = OpenAI(api_key=api_key, base_url=base_url)
             
@@ -166,101 +157,99 @@ if uploaded_file:
             status_text = st.empty()
             
             try:
-                # --- 循环处理每个块 (Chunking) ---
+                # Prompt 强化：加入了你喜欢的“情绪切分”示例
+                system_prompt = """
+                你是一个电影分镜导演。请将文本拆解为分镜脚本。
+                
+                【核心指令】：
+                1. **必须无损**：严禁删减原文任何文字。
+                2. **格式**：一行一个分镜，不要加序号（系统会加）。
+                3. **切分逻辑（模仿以下风格）**：
+                   - "笑着说画技再好哪比得上亲身体会" -> 拆分为：
+                     笑着说画技再好
+                     哪比得上亲身体会
+                   - "用在我身上日复一日" -> 拆分为：
+                     ——用在我身上
+                     日复一日
+                4. **硬性限制**：单行绝对不可超过35字，长句必须在语义停顿处切开。
+                """
+
                 for i, chunk in enumerate(chunks):
-                    current_step = i + 1
-                    status_text.text(f"正在规划第 {current_step}/{total_chunks} 块镜头... ({len(chunk)}字)")
+                    status_text.markdown(f"**🎬 正在处理第 {i+1}/{total_chunks} 幕...**")
                     
                     response = client.chat.completions.create(
                         model=model_id,
                         messages=[
-                            {"role": "system", "content": get_system_prompt()},
-                            {"role": "user", "content": f"处理以下文本：\n{chunk}"}
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": f"处理这段剧情：\n{chunk}"}
                         ],
-                        temperature=0.1
+                        temperature=0.1 # 极低温度保证不乱改字
                     )
                     
-                    # 获取结果并清理
-                    chunk_res = response.choices[0].message.content
-                    full_results.append(chunk_res)
-                    
-                    # 更新进度条
-                    progress_bar.progress(current_step / total_chunks)
+                    res_text = response.choices[0].message.content
+                    full_results.append(res_text)
+                    progress_bar.progress((i + 1) / total_chunks)
 
-                status_text.text("✅ 所有镜头规划完毕，正在进行最终合成...")
-                
-                # --- 合成最终结果 ---
-                # 将所有段落拼合，并统一按行分割
-                combined_text = "\n".join(full_results)
+                # 合成
+                combined = "\n".join(full_results)
                 # 清洗空行
-                final_lines = [line.strip() for line in combined_text.split('\n') if line.strip()]
+                final_lines = [line.strip() for line in combined.split('\n') if line.strip()]
                 
-                # 重新加上序号 (1. 2. 3...)
-                numbered_text = ""
-                raw_text_only = "" # 用于计算生成总字数
+                # 重建序号文本
+                final_output_text = ""
+                raw_output_content = ""
                 for idx, line in enumerate(final_lines):
-                    clean_line = re.sub(r'^\d+[.、]\s*', '', line) # 再次清洗以防AI自己加了序号
-                    numbered_text += f"{idx+1}. {clean_line}\n"
-                    raw_text_only += clean_line
+                    clean = re.sub(r'^\d+[.、]\s*', '', line)
+                    final_output_text += f"{idx+1}. {clean}\n"
+                    raw_output_content += clean
 
-                # --- 结果展示页面 (模仿图3) ---
-                st.markdown("---")
+                # --- 结果分析区 ---
+                st.success("🎉 分镜生成完毕！")
                 
-                # 计算统计数据
-                output_len = len(raw_text_only)
-                deviation = output_len - input_len
-                scene_count = len(final_lines)
-                avg_len = round(output_len / scene_count, 1) if scene_count > 0 else 0
-
-                # 顶部统计栏 (Columns)
+                # 关键：计算纯汉字偏差（忽略标点）
+                output_pure_len = len(normalize_text_for_comparison(raw_output_content))
+                diff = output_pure_len - input_pure_len
+                
+                # 统计面板
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("原文总字数", f"{input_len}")
-                m2.metric("生成分镜总数", f"{scene_count} 组")
-                m3.metric("处理后总字数", f"{output_len}")
-                m4.metric("偏差值", f"{deviation} 字", 
-                          delta_color="off" if deviation == 0 else "inverse")
+                m1.metric("生成分镜组数", f"{len(final_lines)} 组")
+                m2.metric("原文纯净字数(无标点)", f"{input_pure_len}")
+                m3.metric("分镜纯净字数(无标点)", f"{output_pure_len}")
                 
-                if abs(deviation) > 10:
-                    st.warning(f"⚠️ 偏差：{deviation} 字。正数为重复/脑补，负数为漏字。")
+                # 智能偏差显示
+                if diff == 0:
+                    m4.metric("内容完整度", "完美无损 ✅", delta="0", delta_color="normal")
+                else:
+                    m4.metric("内容偏差", f"{diff} 字", delta="可能漏字" if diff < 0 else "可能重复", delta_color="inverse")
+                    if abs(diff) > 10:
+                        st.error(f"⚠️ 警告：检测到 {abs(diff)} 个汉字的实质性差异，请检查右侧表格。")
 
-                # --- 双栏布局：左侧编辑器，右侧分析表 ---
-                col_left, col_right = st.columns([1.8, 1.2]) # 左宽右窄
+                # 双栏展示
+                c_left, c_right = st.columns([1.5, 1])
                 
-                with col_left:
-                    st.subheader("🎬 视觉分镜编辑器 (无损还原)")
-                    # Text Area用于复制
-                    st.text_area("分镜正文", value=numbered_text, height=600)
-                    
-                    st.download_button(
-                        "💾 下载最终分镜稿",
-                        data=numbered_text,
-                        file_name="分镜脚本.txt"
-                    )
+                with c_left:
+                    st.subheader("📝 分镜脚本编辑器")
+                    st.text_area("可直接复制", value=final_output_text, height=600)
+                    st.download_button("📥 下载脚本", data=final_output_text, file_name="无损分镜.txt")
 
-                with col_right:
-                    st.subheader("📊 实时视觉节奏分析")
-                    # 生成 DataFrame
-                    df = parse_storyboard_to_df(numbered_text)
-                    
-                    # 使用 Streamlit 的 Column Config 美化表格
+                with c_right:
+                    st.subheader("📊 视觉节奏表")
+                    df = parse_df(final_output_text)
                     st.dataframe(
                         df,
                         column_config={
-                            "序号": st.column_config.NumberColumn("序号", width="small"),
-                            "内容预览": st.column_config.TextColumn("内容预览", width="large"),
-                            "长度": st.column_config.ProgressColumn(
-                                "长度", 
-                                format="%d", 
+                            "序号": st.column_config.NumberColumn(width="small"),
+                            "字数": st.column_config.ProgressColumn(
+                                "时长估算", 
+                                format="%d 字", 
                                 min_value=0, 
-                                max_value=50, # 进度条最大值设为50，方便看35的界限
+                                max_value=40
                             ),
-                            "状态": st.column_config.TextColumn("状态", width="small"),
+                            "视觉节奏": st.column_config.TextColumn(width="small")
                         },
                         hide_index=True,
                         height=600
                     )
-                    
-                    st.info(f"平均每镜停留：{avg_len} 字 (约 {round(avg_len/7, 1)} 秒)")
 
             except Exception as e:
-                st.error(f"处理过程中发生错误: {e}")
+                st.error(f"❌ 运行中断：{e}")
