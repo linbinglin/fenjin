@@ -1,113 +1,94 @@
 import streamlit as st
-import openai
-import re
+from openai import OpenAI
+import io
 
-# 页面配置
-st.set_page_config(page_title="智能文案深度分镜", layout="wide")
-
-# --- 辅助函数 ---
-
-def pre_process_text(text):
-    """
-    预处理：抹掉原文所有换行，防止AI参考原段落偷懒
-    """
-    # 替换掉所有换行符、制表符
-    cleaned = re.sub(r'[\r\n\t]+', '', text)
-    # 压缩多余空格
-    cleaned = re.sub(r'\s+', '', cleaned)
-    return cleaned
-
-def renumber_text(text):
-    """
-    本地逻辑：重新对用户修改后的分镜进行 1.2.3. 编号
-    """
-    lines = text.split('\n')
-    cleaned_lines = []
-    for line in lines:
-        # 移除行首已有的任何数字编号和特殊符号
-        new_line = re.sub(r'^\d+[\.．\s、\-]*', '', line.strip())
-        if new_line:
-            cleaned_lines.append(new_line)
-    return "\n".join([f"{i+1}.{content}" for i, content in enumerate(cleaned_lines)])
+st.set_page_config(page_title="电影解说AI全流程分镜师", layout="wide")
 
 # --- 侧边栏配置 ---
-with st.sidebar:
-    st.header("⚙️ 系统配置")
-    api_key = st.text_input("API Key", type="password")
-    base_url = st.text_input("接口地址", value="https://blog.tuiwen.xyz/v1")
-    model_id = st.text_input("Model ID", value="gpt-4o")
-    
-    st.markdown("---")
-    st.write("### 🎬 分镜逻辑设定")
-    st.caption("1. 系统会自动抹除原文段落，强制AI深度理解。")
-    st.caption("2. 分镜触发：场景/对话/动作切换。")
-    st.caption("3. 字数：35字左右为参考，逻辑完整优先。")
+st.sidebar.title("⚙️ 配置中心")
+api_key = st.sidebar.text_input("输入 API Key", type="password")
+base_url = st.sidebar.text_input("中转接口地址", value="https://blog.tuiwen.xyz/v1")
+model_id = st.sidebar.text_input("Model ID", value="gpt-4o")
+
+st.sidebar.markdown("""
+### 📘 创作规范
+1. **40字原则**：文案超40字自动拆分，确保视频时长够用。
+2. **MJ描述**：静态场景+人物外貌+着装（不含动作）。
+3. **即梦描述**：镜头语言+核心动作（短句化，单焦原则）。
+4. **一致性**：强制带入预设的角色外貌描述。
+""")
 
 # --- 主界面 ---
-st.title("🎞️ 电影解说文案深度分镜工具")
+st.title("🎬 电影解说全流程分镜助手")
+st.caption("从文案到分镜，从Midjourney画面到即梦AI视频运动描述")
 
-if 'storyboard_data' not in st.session_state:
-    st.session_state.storyboard_data = ""
+col1, col2 = st.columns(2)
 
-uploaded_file = st.file_uploader("第一步：上传文案 (TXT)", type=['txt'])
-
-if uploaded_file:
-    original_content = uploaded_file.getvalue().decode("utf-8")
+with col1:
+    st.subheader("1. 故事文案 (TXT)")
+    text_file = st.file_uploader("上传文案文件", type=['txt'])
     
-    if st.button("🚀 开始深度逻辑分镜"):
-        if not api_key:
-            st.error("请在侧边栏配置 API Key")
-        else:
-            # 执行数据清洗：让AI无从参考原段落
-            clean_input = pre_process_text(original_content)
-            
-            client = openai.OpenAI(api_key=api_key, base_url=base_url)
-            with st.spinner("AI 正在解析视觉逻辑并划分分镜..."):
-                prompt = f"""你是一个优秀的电影解说工作员，请对以下无格式文案进行深度剧情分析并分镜。
-
-【重要前提】：
-我已将原文的段落格式全部抹除，请你根据文字描绘的视觉逻辑重新划分。
-
-【分镜准则】：
-1. 剧情导向：严格根据场景转换、角色对话切换、动作画面改变来设定下一个分镜。
-2. 文本完整：不遗漏、不增减、不修改原文中的任何一个字。
-3. 节奏控制：每个分镜内容不宜过长，参考长度为35字左右（约5秒音频），但请务必保证句子完整，不要在主谓宾中间生硬截断。
-4. 连贯流畅：让分镜转场符合电影解说的叙事节奏。
-
-【输出格式】：
-1.内容
-2.内容
-3.内容
-（注意：行与行之间不要留空行）
-
-【待处理文案】：
-{clean_input}"""
-
-                response = client.chat.completions.create(
-                    model=model_id,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3
-                )
-                st.session_state.storyboard_data = response.choices[0].message.content
-
-# --- 编辑与微调区 ---
-if st.session_state.storyboard_data:
-    st.markdown("---")
-    st.subheader("第二步：分镜手动微调")
-    st.info("💡 操作指南：直接在下方框内【回车】拆分分镜，或【退格】合并分镜。修改完后点击“刷新编号”即可。")
-    
-    # 编辑文本框
-    user_edited = st.text_area(
-        "分镜编辑器", 
-        value=st.session_state.storyboard_data, 
-        height=500,
-        key="editor"
+with col2:
+    st.subheader("2. 核心角色外貌设定")
+    character_info = st.text_area(
+        "描述每个角色的外貌、穿着（用于保持画面一致性）", 
+        placeholder="例如：\n赵清月：清冷美人，银丝蝴蝶簪，白色刺绣绫罗纱衣。\n赵灵曦：明艳张扬，杏眼桃腮，黄色妆花襦裙。",
+        height=150
     )
+
+if text_file and character_info:
+    raw_text = io.StringIO(text_file.getvalue().decode("utf-8")).read()
     
-    c1, c2, c3 = st.columns([1, 1, 4])
-    with c1:
-        if st.button("🔄 刷新数字编号"):
-            st.session_state.storyboard_data = renumber_text(user_edited)
-            st.rerun()
-    with c2:
-        st.download_button("📥 导出分镜稿", st.session_state.storyboard_data, "final_storyboard.txt")
+    if st.button("🚀 生成深度分镜指令"):
+        if not api_key:
+            st.error("请输入API Key")
+        else:
+            try:
+                client = OpenAI(api_key=api_key, base_url=base_url)
+                
+                system_prompt = f"""你是一个顶级的电影解说导演和AI视频专家。
+你的任务是根据提供的【文案】和【角色设定】，生成完美适配Midjourney（生图）和即梦AI（生视频）的分镜脚本。
+
+### 核心约束：
+1. **分镜切分**：每个分镜对应的文案严禁超过40个字符（约5秒音频）。超过则必须拆分为多个分镜。
+2. **场景切换/对话切换**：必须作为新分镜。
+3. **角色一致性**：必须在每个分镜的【画面描述】中包含提供的【角色设定】。
+
+### 描述生成逻辑（即梦AI适配）：
+- **画面描述 (Midjourney)**：描述场景、环境、人物静态外表、着装、光影。**禁止描述动作**。
+- **视频生成 (即梦AI)**：描述动作、表情、镜头语言。采用**短句堆砌**。
+- **单焦原则**：一个视频分镜只强调1-2个动作，避免三方复杂互动。
+
+### 角色设定参考：
+{character_info}
+
+### 输出格式（严格遵守）：
+数字序号.【文案内容】
+- 画面描述：[场景 + 人物外表着装 + 艺术风格]
+- 视频生成：[镜头动作 + 人物神态动作 + 氛围]
+--------------------------------------------------
+"""
+
+                with st.spinner("导演正在构思画面，请稍后..."):
+                    response = client.chat.completions.create(
+                        model=model_id,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": f"请对以下文案进行二次分镜和画面导演描述：\n\n{raw_text}"}
+                        ],
+                        temperature=0.7,
+                        stream=True
+                    )
+                    
+                    st.subheader("📽️ 最终导演分镜表")
+                    placeholder = st.empty()
+                    full_response = ""
+                    for chunk in response:
+                        if chunk.choices[0].delta.content:
+                            full_response += chunk.choices[0].delta.content
+                            placeholder.markdown(full_response)
+                            
+                    st.download_button("导出分镜脚本", full_response, file_name="director_script.txt")
+
+            except Exception as e:
+                st.error(f"处理失败: {str(e)}")
