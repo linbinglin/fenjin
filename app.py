@@ -3,103 +3,111 @@ import openai
 import re
 
 # 页面配置
-st.set_page_config(page_title="流式文案分镜工具", layout="wide")
+st.set_page_config(page_title="智能文案深度分镜", layout="wide")
 
-# --- 自定义样式：让文本框看起来更像分镜表 ---
-st.markdown("""
-    <style>
-    .stTextArea textarea {
-        font-family: 'Courier New', Courier, monospace;
-        line-height: 1.6;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+# --- 辅助函数 ---
 
-# --- 初始化 Session State ---
-if 'current_content' not in st.session_state:
-    st.session_state.current_content = ""
+def pre_process_text(text):
+    """
+    预处理：抹掉原文所有换行，防止AI参考原段落偷懒
+    """
+    # 替换掉所有换行符、制表符
+    cleaned = re.sub(r'[\r\n\t]+', '', text)
+    # 压缩多余空格
+    cleaned = re.sub(r'\s+', '', cleaned)
+    return cleaned
 
 def renumber_text(text):
-    """本地逻辑：将文本按行重新编号，去除原有的乱序编号"""
-    # 移除行首已有的数字和点（例如 "1.", "2. ", "10 "）
+    """
+    本地逻辑：重新对用户修改后的分镜进行 1.2.3. 编号
+    """
     lines = text.split('\n')
     cleaned_lines = []
     for line in lines:
-        # 匹配行首的 数字+点 或 数字+空格 并去掉
-        new_line = re.sub(r'^\d+[\.．\s]*', '', line.strip())
-        if new_line: # 只保留有内容的行
+        # 移除行首已有的任何数字编号和特殊符号
+        new_line = re.sub(r'^\d+[\.．\s、\-]*', '', line.strip())
+        if new_line:
             cleaned_lines.append(new_line)
-    
-    # 重新添加连续编号
     return "\n".join([f"{i+1}.{content}" for i, content in enumerate(cleaned_lines)])
 
-# --- 侧边栏 ---
+# --- 侧边栏配置 ---
 with st.sidebar:
-    st.header("⚙️ 配置中心")
+    st.header("⚙️ 系统配置")
     api_key = st.text_input("API Key", type="password")
     base_url = st.text_input("接口地址", value="https://blog.tuiwen.xyz/v1")
     model_id = st.text_input("Model ID", value="gpt-4o")
     
     st.markdown("---")
-    st.write("### ⌨️ 编辑技巧")
-    st.info("""
-    - **拆分**：在文字中点击鼠标，按【回车】
-    - **合并**：在行首按【退格/删除】
-    - **整理**：编辑完点下方的“重新对齐编号”
-    """)
+    st.write("### 🎬 分镜逻辑设定")
+    st.caption("1. 系统会自动抹除原文段落，强制AI深度理解。")
+    st.caption("2. 分镜触发：场景/对话/动作切换。")
+    st.caption("3. 字数：35字左右为参考，逻辑完整优先。")
 
-st.title("🎬 紧凑型分镜编辑器")
+# --- 主界面 ---
+st.title("🎞️ 电影解说文案深度分镜工具")
 
-# --- 主逻辑 ---
+if 'storyboard_data' not in st.session_state:
+    st.session_state.storyboard_data = ""
+
 uploaded_file = st.file_uploader("第一步：上传文案 (TXT)", type=['txt'])
 
 if uploaded_file:
-    raw_text = uploaded_file.getvalue().decode("utf-8")
+    original_content = uploaded_file.getvalue().decode("utf-8")
     
-    if st.button("🚀 AI 初始分镜"):
+    if st.button("🚀 开始深度逻辑分镜"):
         if not api_key:
-            st.error("请先输入 API Key")
+            st.error("请在侧边栏配置 API Key")
         else:
+            # 执行数据清洗：让AI无从参考原段落
+            clean_input = pre_process_text(original_content)
+            
             client = openai.OpenAI(api_key=api_key, base_url=base_url)
-            with st.spinner("AI 正在根据剧情深度分镜..."):
-                prompt = f"""你是一个电影解说分镜专家。
-                任务：将文案拆分为分镜。
-                原则：
-                1. 场景切换、角色对话、动作改变必须换行。
-                2. 保持剧情连贯，不生硬切断句子。
-                3. 严禁改动原文任何字词，不增不减。
-                4. 格式要求：每一行就是一个分镜，序号开头，行与行之间【严禁】有空行。
-                
-                原文内容：
-                {raw_text}"""
-                
+            with st.spinner("AI 正在解析视觉逻辑并划分分镜..."):
+                prompt = f"""你是一个优秀的电影解说工作员，请对以下无格式文案进行深度剧情分析并分镜。
+
+【重要前提】：
+我已将原文的段落格式全部抹除，请你根据文字描绘的视觉逻辑重新划分。
+
+【分镜准则】：
+1. 剧情导向：严格根据场景转换、角色对话切换、动作画面改变来设定下一个分镜。
+2. 文本完整：不遗漏、不增减、不修改原文中的任何一个字。
+3. 节奏控制：每个分镜内容不宜过长，参考长度为35字左右（约5秒音频），但请务必保证句子完整，不要在主谓宾中间生硬截断。
+4. 连贯流畅：让分镜转场符合电影解说的叙事节奏。
+
+【输出格式】：
+1.内容
+2.内容
+3.内容
+（注意：行与行之间不要留空行）
+
+【待处理文案】：
+{clean_input}"""
+
                 response = client.chat.completions.create(
                     model=model_id,
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=0.2
+                    temperature=0.3
                 )
-                st.session_state.current_content = response.choices[0].message.content
+                st.session_state.storyboard_data = response.choices[0].message.content
 
-# --- 编辑区 ---
-if st.session_state.current_content:
-    st.subheader("第二 step：分镜微调")
+# --- 编辑与微调区 ---
+if st.session_state.storyboard_data:
+    st.markdown("---")
+    st.subheader("第二步：分镜手动微调")
+    st.info("💡 操作指南：直接在下方框内【回车】拆分分镜，或【退格】合并分镜。修改完后点击“刷新编号”即可。")
     
-    # 编辑框
-    edited_content = st.text_area(
-        "分镜内容 (直接在此处回车拆分或退格合并)", 
-        value=st.session_state.current_content, 
+    # 编辑文本框
+    user_edited = st.text_area(
+        "分镜编辑器", 
+        value=st.session_state.storyboard_data, 
         height=500,
-        key="main_editor"
+        key="editor"
     )
     
-    col1, col2 = st.columns([1, 5])
-    with col1:
-        if st.button("🔄 重新对齐编号"):
-            # 使用本地正则逻辑重新排版，不消耗API额度
-            st.session_state.current_content = renumber_text(edited_content)
+    c1, c2, c3 = st.columns([1, 1, 4])
+    with c1:
+        if st.button("🔄 刷新数字编号"):
+            st.session_state.storyboard_data = renumber_text(user_edited)
             st.rerun()
-            
-    with col2:
-        st.download_button("📥 导出最终文案", st.session_state.current_content, "final_storyboard.txt")
-
-    st.success("调整提示：修改完文字或段落后，点击‘重新对齐编号’即可自动恢复 1.2.3. 顺序。")
+    with c2:
+        st.download_button("📥 导出分镜稿", st.session_state.storyboard_data, "final_storyboard.txt")
