@@ -4,183 +4,157 @@ import io
 import re
 import pandas as pd
 
-st.set_page_config(page_title="电影解说AI分镜导演", layout="wide")
+st.set_page_config(page_title="AI电影解说导演系统 Pro", layout="wide")
 
-# --- 初始化 Session State ---
-if 'original_raw' not in st.session_state: st.session_state.original_raw = ""
-if 'current_storyboard' not in st.session_state: st.session_state.current_storyboard = ""
-if 'batch_results' not in st.session_state: st.session_state.batch_results = []
-if 'process_idx' not in st.session_state: st.session_state.process_idx = 0
+# --- 初始化全局状态 ---
+if 'raw_stream' not in st.session_state: st.session_state.raw_stream = "" # 物理粉碎后的原文
+if 'storyboard_output' not in st.session_state: st.session_state.storyboard_output = "" # 第一步结果
+if 'batch_results' not in st.session_state: st.session_state.batch_results = [] # 第二步结果
+if 'current_idx' not in st.session_state: st.session_state.current_idx = 0 # 批次进度
 
 # --- 侧边栏配置 ---
-st.sidebar.title("⚙️ 导演室设置")
-api_key = st.sidebar.text_input("API Key", type="password")
-base_url = st.sidebar.text_input("接口地址", value="https://blog.tuiwen.xyz/v1")
-model_id = st.sidebar.text_input("Model ID", value="gpt-4o")
+st.sidebar.title("⚙️ 导演中心配置")
+api_key = st.sidebar.text_input("输入 API Key", type="password")
+base_url = st.sidebar.text_input("中转接口地址", value="https://blog.tuiwen.xyz/v1")
+model_id = st.sidebar.text_input("模型 ID", value="gpt-4o")
 
-st.title("🎬 电影解说全流程无损分镜导演")
-st.info("💡 核心规则：35字/5秒原则，一字不差，强制序号。")
+st.title("🎬 电影解说全流程导演分镜系统")
+st.markdown("---")
 
-# ================= 第一阶段：物理粉碎与分镜重组 =================
-st.header("Step 1: 文案重组分镜 (无损切割)")
+# ================= 第一阶段：导演思维分镜 =================
+st.header("Step 1: 语义聚拢分镜（决定节奏）")
 
-uploaded_file = st.file_uploader("选择本地TXT文案", type=['txt'])
+uploaded_file = st.file_uploader("上传文案 (TXT)", type=['txt'])
 
 if uploaded_file:
-    # 彻底抹除原段落逻辑
-    raw_text = io.StringIO(uploaded_file.getvalue().decode("utf-8")).read()
-    # 物理粉碎：去掉所有换行、空格、特殊制表符
-    clean_stream = re.sub(r'[\s\n\r\t]+', '', raw_text).strip()
-    st.session_state.original_raw = clean_stream
+    # 【物理操作】物理剔除所有段落和换行，形成无结构长字符流
+    content = io.StringIO(uploaded_file.getvalue().decode("utf-8")).read()
+    clean_stream = re.sub(r'[\s\n\r\t]+', '', content).strip()
+    st.session_state.raw_stream = clean_stream
     
-    st.write(f"✅ **文本已物理粉碎**：待处理字符总数 {len(clean_stream)} 字。")
+    st.write(f"📝 **字符指纹已锁定**：原文共 {len(clean_stream)} 字。已彻底抹除原段落结构。")
 
-    if st.button("🚀 开始生成分镜草稿"):
+    if st.button("📽️ 启动导演思维分镜"):
         if not api_key:
-            st.error("请先配置 API Key")
+            st.error("请先输入 API Key")
         else:
             try:
                 client = OpenAI(api_key=api_key, base_url=base_url)
                 
-                # 极端严厉的 Step 1 指令
-                step1_prompt = f"""你是一个电影分镜导演。你的任务是对下面这段没有任何段落的文案进行【无损分镜切割】。
+                # 【核心 Prompt 升级】：强化语义聚拢，严禁丢字
+                director_logic = f"""你是一名拥有10年经验的电影剪辑导演。现在我给你一段物理粉碎后、没有任何格式的文案长流。
+                
+### 你的分镜原则：
+1. **聚合优先（解决分镜太碎）**：不要一句话分一个镜！一个分镜代表5秒的叙事空间。如果连续的短句在描述同一个场景或连贯动作（如：他翻开书，皱起眉头，叹了口气），必须聚拢在一个分镜中。
+2. **字数红线（解决分镜拥挤）**：每个分镜文案的理想长度在 25-35 字符之间。绝对严禁超过40个字符（超过5秒）。
+3. **强制序号**：每一行必须以“数字.”开头，如“1.文案”。
+4. **无损切割（严禁改字）**：原文一字不差，不准总结，不准漏字。你只是在文字流中决定哪里该剪开。
+5. **切割点逻辑**：仅在“换人说话”、“换地点”、“时间跳跃”或“动作意图彻底改变”且总字数已接近35字时才剪断。
 
-### 强制准则（必须严格遵守）：
-1. **绝对无损**：严禁删除、修改、缩减、添加原文中的任何一个字。
-2. **强制序号**：每一行必须以“数字.”开头，例如：1.文案内容
-3. **字数红线**：每个分镜文案理想在 20-35 字符。绝对禁止超过 40 字符（对应5秒音频）。
-4. **分镜逻辑**：
-   - 只要遇到：角色说话、场景切换、核心动作改变，必须另起一行作为新分镜。
-   - 如果连续短句在35字内且属于同一连贯动作，请聚拢在一行。
-
-### 待处理字符流：
+### 待处理文案流：
 {clean_stream}"""
 
-                with st.spinner("AI 正在逐字分析并进行无损分镜..."):
+                with st.spinner("导演正在深度思考叙事节奏..."):
                     response = client.chat.completions.create(
                         model=model_id,
                         messages=[
-                            {"role": "system", "content": "你是一个无损分镜机器人。只输出带序号的分镜，不准说废话，不准漏字。"},
-                            {"role": "user", "content": step1_prompt}
+                            {"role": "system", "content": "你只负责无损分镜切割。"},
+                            {"role": "user", "content": director_logic}
                         ],
-                        temperature=0 # 强制确定性
+                        temperature=0.2 # 保证稳定性
                     )
-                    st.session_state.current_storyboard = response.choices[0].message.content
+                    st.session_state.storyboard_output = response.choices[0].message.content
                     st.session_state.batch_results = []
-                    st.session_state.process_idx = 0
+                    st.session_state.current_idx = 0
             except Exception as e:
-                st.error(f"分镜生成异常: {str(e)}")
+                st.error(f"分镜失败: {str(e)}")
 
-# 展示与校验面板
-if st.session_state.current_storyboard:
-    col_edit, col_mon = st.columns([3, 2])
+# 第一阶段预览与精修
+if st.session_state.storyboard_output:
+    col_edit, col_audit = st.columns([3, 2])
     
     with col_edit:
-        st.subheader("✍️ 分镜编辑区 (确认序号和字数)")
-        # 用户可以在此手动校正 AI 遗漏的序号或过长的句子
-        st.session_state.current_storyboard = st.text_area(
-            "分镜文案草稿", 
-            value=st.session_state.current_storyboard, 
-            height=500
-        )
+        st.subheader("✍️ 分镜编辑区（可手动校对）")
+        edited_text = st.text_area("分镜文案（每行一个5秒镜头）", value=st.session_state.storyboard_output, height=500)
+        st.session_state.storyboard_output = edited_text
 
-    with col_mon:
-        st.subheader("📊 实时监控看板")
-        lines = [l.strip() for l in st.session_state.current_storyboard.split('\n') if l.strip()]
+    with col_audit:
+        st.subheader("📊 实时监控与审计")
+        lines = [l.strip() for l in edited_text.split('\n') if l.strip()]
         
-        analysis_data = []
-        reconstructed_text = ""
+        # 丢字检测审计
+        recombined = "".join([re.sub(r'^\d+[\.、\s]+', '', l) for l in lines])
+        orig_len = len(st.session_state.raw_stream)
+        curr_len = len(recombined)
         
-        for i, line in enumerate(lines):
-            # 正则匹配序号：1. 或者 1、
-            match = re.match(r'^(\d+)[.、\s]+(.*)', line)
-            if match:
-                num, content = match.groups()
-                reconstructed_text += content
-                char_len = len(content)
-            else:
-                content = line
-                reconstructed_text += content
-                char_len = len(content)
-                num = "ERR" # 缺失序号标记
-
-            # 评估状态
-            if char_len > 40: status = "🔴 过长(>40)"
-            elif char_len > 35: status = "🟡 拥挤(>35)"
-            elif num == "ERR": status = "⚠️ 缺失序号"
-            else: status = "🟢 理想"
-            
-            analysis_data.append({"序号": num, "内容预览": content[:10]+"...", "字数": char_len, "节奏": status})
-        
-        # 无损校验
-        orig_len = len(st.session_state.original_raw)
-        curr_len = len(reconstructed_text)
         if orig_len == curr_len:
-            st.success(f"✅ 无损检测：通过 ({curr_len}/{orig_len})")
+            st.success(f"✅ 内容无损：共 {curr_len} 字")
         else:
-            diff = orig_len - curr_len
-            st.error(f"⚠️ 丢字警告：原{orig_len}字，现{curr_len}字 (相差{diff}字)")
+            st.error(f"⚠️ 丢字预警：原文{orig_len}字，当前{curr_len}字（差额{orig_len - curr_len}）")
+
+        # 节奏评估表格
+        analysis = []
+        for i, l in enumerate(lines):
+            content = re.sub(r'^\d+[\.、\s]+', '', l)
+            length = len(content)
+            # 这里的评估逻辑是核心：引导用户不要分得太碎
+            if length > 40: status = "🔴 太挤(建议拆分)"
+            elif length < 20: status = "🟡 太碎(建议合并)"
+            else: status = "🟢 理想"
+            analysis.append({"序号": i+1, "字数": length, "评价": status})
         
-        st.dataframe(pd.DataFrame(analysis_data), use_container_width=True)
+        st.dataframe(pd.DataFrame(analysis), use_container_width=True)
 
     st.divider()
 
-    # ================= 第二阶段：分步描述生成 =================
-    st.header("Step 2: 生成画面与视频提示词 (分批)")
+    # ================= 第二阶段：分步画面描述生成 =================
+    st.header("Step 2: 生成 AI 画面与视频运动描述")
     
-    char_info = st.text_area("1. 请输入该视频涉及的核心人物描述 (着装、样貌)", 
-                            placeholder="例如：林凡：25岁，剑眉星目，穿着深蓝刺绣长衫，腰佩白玉。",
+    char_desc = st.text_area("1. 录入本批次角色视觉设定", 
+                            placeholder="描述角色的外貌、穿着、风格。如：赵清月：25岁，肤白如雪，穿着月白色刺绣古装。",
                             height=100)
     
-    if char_info:
-        # 预处理确认的分镜列表
-        confirmed_lines = []
-        for l in st.session_state.current_storyboard.split('\n'):
-            if l.strip():
-                # 提取文案
-                m = re.match(r'^(\d+)[.、\s]+(.*)', l.strip())
-                confirmed_lines.append(m.group(2) if m else l.strip())
-        
-        total_shots = len(confirmed_lines)
-        curr_p = st.session_state.process_idx
+    if char_desc:
+        final_lines = [re.sub(r'^\d+[\.、\s]+', '', l.strip()) for l in st.session_state.storyboard_output.split('\n') if l.strip()]
+        total_len = len(final_lines)
+        c_idx = st.session_state.current_idx
         batch_size = 20
-        end_p = min(curr_p + batch_size, total_shots)
+        e_idx = min(c_idx + batch_size, total_len)
 
-        if curr_p < total_shots:
-            if st.button(f"🎞️ 生成分镜描述 ({curr_p + 1} - {end_p})"):
+        if c_idx < total_len:
+            if st.button(f"🎬 生成批次描述 ({c_idx+1} - {e_idx})"):
                 try:
                     client = OpenAI(api_key=api_key, base_url=base_url)
                     batch_text = ""
-                    for i, t in enumerate(confirmed_lines[curr_p:end_p]):
-                        batch_text += f"分镜{curr_p + i + 1}：{t}\n"
+                    for i, t in enumerate(final_lines[c_idx:e_idx]):
+                        batch_text += f"分镜{c_idx+i+1}: {t}\n"
                     
-                    step2_prompt = f"""你现在是视觉导演。请根据分镜文案生成提示词。
+                    desc_prompt = f"""你现在是顶级视觉导演。请为以下分镜生成画面提示词。
+                    
+### 角色设定：
+{char_desc}
 
-【角色设定】：
-{char_info}
+### 任务要求：
+1. **画面描述 (Midjourney)**：静态视觉。描述景别（如：特写）、具体场景细节、人物神态、着装材质、环境光影。**严禁描述动作行为**。
+2. **视频生成 (即梦AI)**：动态演变。描述5秒内的动作流。如“人物先是惊愕抬头，随后泪水夺眶而出，镜头缓慢拉近”。
+3. **针对聚拢文案的优化**：因为每个分镜包含多句动作，请在视频描述中体现出动作的【连续性】。
 
-【要求】：
-1. 每个分镜必须包含：[画面描述(Midjourney)]、[视频生成(即梦AI)]。
-2. **画面描述**：针对Midjourney。描述静态：景别、场景、人物细节、光影、材质。严禁描述行为。
-3. **视频生成**：针对即梦AI。描述动态：5秒内的动作流、微表情变化、镜头推移。采用短句堆砌。
-4. **单焦原则**：一个分镜专注一个视觉重心，动作连贯。
-
-【待处理文案】：
+待处理分镜组：
 {batch_text}"""
-
-                    with st.spinner("正在精修视觉提示词..."):
+                    
+                    with st.spinner("AI 正在构思视觉动态..."):
                         response = client.chat.completions.create(
                             model=model_id,
-                            messages=[{"role": "user", "content": step2_prompt}]
+                            messages=[{"role": "user", "content": desc_prompt}]
                         )
                         st.session_state.batch_results.append(response.choices[0].message.content)
-                        st.session_state.process_idx = end_p
+                        st.session_state.current_idx = e_idx
                         st.rerun()
                 except Exception as e:
                     st.error(f"描述生成失败: {e}")
         else:
-            st.success("✅ 全部分镜描述生成完毕！")
+            st.success("✅ 脚本全部描述完成！")
 
-        for r_idx, r_text in enumerate(st.session_state.batch_results):
-            with st.expander(f"📦 批次 {r_idx+1} 生成结果 (20组)", expanded=True):
-                st.markdown(r_text)
+        for r in st.session_state.batch_results:
+            st.markdown(r)
+            st.divider()
