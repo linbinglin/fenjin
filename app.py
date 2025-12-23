@@ -1,68 +1,18 @@
 import streamlit as st
 from openai import OpenAI
 import pandas as pd
+import io
 
-# --- 页面基础设置 ---
-st.set_page_config(
-    page_title="漫剧AI分镜导演 (即梦适配版)",
-    page_icon="🎬",
-    layout="wide"
-)
+# --- 页面配置 ---
+st.set_page_config(page_title="漫剧AI分镜导演 (即梦适配版)", page_icon="🎬", layout="wide")
 
-# ==========================================
-# 1. 侧边栏：API 与 模型配置 (核心修复部分)
-# ==========================================
-st.sidebar.title("⚙️ 设置控制台")
+# --- 侧边栏配置 ---
+st.sidebar.title("⚙️ 导演控制台")
+base_url = st.sidebar.text_input("API Base URL", value="https://blog.tuiwen.xyz/v1")
+api_key = st.sidebar.text_input("API Key", type="password")
+model = st.sidebar.selectbox("选择模型", ["gpt-4o", "deepseek-chat", "claude-3-5-sonnet-20240620", "gemini-pro"], index=0)
 
-# --- 接口地址 ---
-default_base_url = "https://blog.tuiwen.xyz/v1"
-base_url = st.sidebar.text_input(
-    "API Base URL (中转地址)", 
-    value=default_base_url,
-    help="请填写第三方接口地址，例如：https://blog.tuiwen.xyz/v1"
-)
-
-# --- API Key ---
-api_key = st.sidebar.text_input("API Key", type="password", help="请输入你的 API 密钥")
-
-st.sidebar.divider()
-
-# --- Model ID 选择 (修复：支持下拉 + 手动输入) ---
-st.sidebar.markdown("### 🤖 模型选择 (Model ID)")
-
-# 预设模型列表
-model_options = [
-    "gpt-4o",
-    "gpt-4o-mini",
-    "deepseek-chat",
-    "claude-3-5-sonnet-20240620",
-    "gemini-pro",
-    "doubao-pro-4k"
-]
-
-# 下拉选择框
-selected_model = st.sidebar.selectbox(
-    "选择预设模型", 
-    model_options,
-    index=0
-)
-
-# 手动输入框 (优先级高于下拉框)
-custom_model_input = st.sidebar.text_input(
-    "或手动输入模型 ID (自定义)", 
-    value="",
-    help="如果下拉列表中没有你想要的模型，请在此直接输入模型 ID，例如：gpt-4-turbo"
-)
-
-# 最终决定使用的模型 ID
-final_model = custom_model_input if custom_model_input.strip() else selected_model
-
-st.sidebar.info(f"当前使用的 Model ID: **{final_model}**")
-
-
-# ==========================================
-# 2. 核心逻辑：导演思维链 (保留高级分镜逻辑)
-# ==========================================
+# --- 核心逻辑：导演思维链 ---
 def get_director_prompt():
     return """
     你是一位精通“即梦(Jimeng)”等AI视频生成工具的专业分镜导演。
@@ -94,72 +44,68 @@ def get_director_prompt():
     4. **一致性**：全篇分镜中，角色的外貌描述必须保持一致（例如：始终描述为“8岁男孩，脏脸，灰布衣”）。
 
     ### 输出格式要求
-    请输出为一个标准的 Markdown 表格，包含三列，不要输出任何开场白：
+    请输出为一个标准的 Markdown 表格，包含三列：
     | 序号 | 配音文案 (严格保留原文，仅做切分) | 画面提示词 (适配即梦的英文或中文Prompt) |
     """
 
-# ==========================================
-# 3. 主界面 UI
-# ==========================================
-st.title("🎬 漫剧自动分镜系统 (即梦适配版)")
-st.markdown(f"当前接入模型：`{final_model}`")
+# --- 主界面 ---
+st.title("🎬 漫剧自动分镜系统 (Jimeng/即梦 专用版)")
+st.markdown("""
+> **设计理念**：不仅是分段，更是将文本翻译为**镜头语言**。
+> *   **配音文案**：严格卡点（<5秒），确保音画同步。
+> *   **画面提示词**：遵循“权重前置、单焦原则”，直接适配 AI 绘画/视频工具。
+""")
 
-uploaded_file = st.file_uploader("上传剧本 TXT 文件", type="txt")
+uploaded_file = st.file_uploader("上传剧本 TXT", type="txt")
 
-if uploaded_file:
+if uploaded_file and api_key:
     script_content = uploaded_file.read().decode("utf-8")
     
-    with st.expander("📄 点击查看/收起原始剧本", expanded=False):
-        st.text_area("原文内容", script_content, height=150)
+    with st.expander("📄 查看原始剧本", expanded=False):
+        st.text_area("原文", script_content, height=150)
 
-    # 开始按钮
     if st.button("开始导演分镜", type="primary"):
-        if not api_key:
-            st.error("❌ 请先在侧边栏输入 API Key")
-        else:
-            # 初始化 Client
-            client = OpenAI(api_key=api_key, base_url=base_url)
+        client = OpenAI(api_key=api_key, base_url=base_url)
+        
+        status_box = st.status("🎥 正在分析剧情...", expanded=True)
+        
+        try:
+            status_box.write("1. 正在构建角色画像与场景逻辑...")
+            status_box.write("2. 正在拆解分镜并适配即梦Prompt规则...")
             
-            status_box = st.status("🎥 正在调度 AI 导演...", expanded=True)
-            result_placeholder = st.empty()
-            full_response = ""
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": get_director_prompt()},
+                    {"role": "user", "content": f"请对以下文本进行专业分镜处理，输出表格：\n\n{script_content}"}
+                ],
+                temperature=0.7, # 稍微增加一点灵活性以适配画面描述
+                stream=True
+            )
+            
+            # 流式输出处理
+            result_area = st.empty()
+            full_text = ""
+            
+            for chunk in response:
+                if chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    full_text += content
+                    result_area.markdown(full_text)
+            
+            status_box.update(label="✅ 分镜完成", state="complete", expanded=False)
+            
+            # 提供下载
+            st.download_button(
+                label="📥 下载分镜表 (Markdown)",
+                data=full_text,
+                file_name="director_script.md",
+                mime="text/markdown"
+            )
+            
+        except Exception as e:
+            status_box.update(label="❌ 发生错误", state="error")
+            st.error(f"Error: {e}")
 
-            try:
-                status_box.write(f"1. 已连接模型: {final_model}")
-                status_box.write("2. 正在进行角色画像分析与分镜拆解...")
-                
-                # 调用 API
-                stream = client.chat.completions.create(
-                    model=final_model,
-                    messages=[
-                        {"role": "system", "content": get_director_prompt()},
-                        {"role": "user", "content": f"请对以下文本进行专业分镜处理，输出表格：\n\n{script_content}"}
-                    ],
-                    temperature=0.7, 
-                    stream=True
-                )
-
-                # 流式输出
-                for chunk in stream:
-                    if chunk.choices[0].delta.content:
-                        content = chunk.choices[0].delta.content
-                        full_response += content
-                        result_placeholder.markdown(full_response)
-                
-                status_box.update(label="✅ 分镜处理完成！", state="complete", expanded=False)
-
-                # 下载按钮
-                st.download_button(
-                    label="📥 下载分镜脚本 (.md)",
-                    data=full_response,
-                    file_name="storyboard_jimeng.md",
-                    mime="text/markdown"
-                )
-
-            except Exception as e:
-                status_box.update(label="❌ 发生错误", state="error")
-                st.error(f"调用 API 失败: {str(e)}")
-                st.info("请检查 API Key 是否正确，或该模型 ID 是否支持您的中转接口。")
-
-elif not uploaded_file:
-    st.info("👋 请上传一个 TXT 文件开始使用。")
+elif not api_key:
+    st.info("👈 请先在左侧输入 API Key")
