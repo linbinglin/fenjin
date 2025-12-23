@@ -1,239 +1,103 @@
 import streamlit as st
-from openai import OpenAI
+import requests
+import json
 import re
-import pandas as pd
 
-# --- 页面配置 ---
-st.set_page_config(
-    page_title="导演引擎 V16 (动作回归版)",
-    page_icon="🎬",
-    layout="wide"
-)
+# 页面配置
+st.set_page_config(page_title="文案自动化分镜工具", layout="wide")
 
-# --- CSS ---
-st.markdown("""
-<style>
-    .metric-container { background-color: #f8f9fa; padding: 10px; border-radius: 5px; }
-    .stDataFrame { width: 100%; }
-</style>
-""", unsafe_allow_html=True)
+st.title("🎬 文案自动分镜应用")
+st.caption("输入纯文本，自动根据剧情、动作、对话进行分镜切割")
 
-# --- 侧边栏 ---
+# 侧边栏配置
 with st.sidebar:
-    st.header("⚙️ 导演引擎 V16")
-    st.caption("回归初心：角色·场景·动作")
+    st.header("⚙️ API 配置")
+    base_url = st.text_input("中转接口地址", value="https://blog.tuiwen.xyz/v1")
+    api_key = st.text_input("API Key", type="password")
+    model_id = st.text_input("Model ID", value="gpt-4o", help="例如：deepseek-chat, gpt-4o, claude-3-5-sonnet")
     
-    api_key = st.text_input("API Key", type="password", placeholder="sk-...")
-    base_url = st.text_input("接口地址", value="https://blog.tuiwen.xyz/v1")
-    
-    model_options = ["gpt-4o", "deepseek-chat", "claude-3-5-sonnet-20240620", "gpt-4-turbo"]
-    selected_model = st.selectbox("Model ID", model_options, index=0)
-    
-    if st.checkbox("自定义模型ID"):
-        model_id = st.text_input("输入ID", value=selected_model)
-    else:
-        model_id = selected_model
-
     st.divider()
-    st.markdown("### 🎬 V16 分镜原则")
-    st.info("""
-    **回归最原始的 3 大切分逻辑：**
-    1. 👤 **角色切换**：A说完B说 -> 切！
-    2. 🌍 **场景切换**：室内转室外/白天转黑夜 -> 切！
-    3. 🏃 **动作改变**：推倒 -> 画画 -> 穿衣。动作变了就必须切，哪怕只有3个字！
-    """)
+    max_chars_per_shot = st.slider("每个分镜建议最大字数", 10, 50, 35)
 
-# --- 核心工具函数 ---
+# 主界面布局
+col1, col2 = st.columns(2)
 
-def clean_text_for_ai(text):
-    """预处理：去换行，变纯文本流"""
-    return text.replace("\n", "").replace("\r", "").strip()
+original_text = ""
 
-def sanitize_ai_output(text):
-    """
-    【强制清洗】
-    不管Prompt怎么强调，防止AI脑补画面描述。
-    强制删除所有括号内容。
-    """
-    text = re.sub(r'[\(（【\[].*?[\)）】\]]', '', text)
-    return text
-
-def normalize_text_for_comparison(text):
-    """用于无损比对：忽略标点和空白"""
-    punctuation = r"""!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~“”？，！【】（）、。：；’‘……——"""
-    translator = str.maketrans('', '', punctuation)
-    text = sanitize_ai_output(text) # 先清洗
-    text = re.sub(r'\d+[.、]', '', text)
-    text = re.sub(r'\s+', '', text)
-    return text.translate(translator)
-
-def smart_split_text(text, chunk_size=800):
-    """分块稍微改小一点，保证AI注意力集中在动作分析上"""
-    sentences = re.split(r'([。！？])', text)
-    chunks = []
-    current = ""
-    temp = []
-    for i in range(0, len(sentences)-1, 2):
-        temp.append(sentences[i] + sentences[i+1])
-    if len(sentences) % 2 == 1:
-        temp.append(sentences[-1])
-        
-    for s in temp:
-        if len(current) + len(s) > chunk_size:
-            chunks.append(current)
-            current = s
-        else:
-            current += s
-    if current:
-        chunks.append(current)
-    return chunks
-
-def parse_df(full_text):
-    lines = full_text.split('\n')
-    data = []
-    for i, line in enumerate(lines):
-        if not line.strip(): continue
-        clean_content = re.sub(r'^\d+[.、]\s*', '', line)
-        length = len(clean_content)
-        
-        # 视觉评分逻辑
-        if length > 35: status = "❌ 太长 (需再拆)"
-        elif length < 6: status = "⚡ 快切/动作"
-        else: status = "✅ 标准镜头"
-            
-        data.append({
-            "序号": i+1,
-            "分镜内容": clean_content,
-            "字数": length,
-            "类型": status
-        })
-    return pd.DataFrame(data)
-
-# --- 主程序 ---
-st.title("🎬 导演引擎 V16 (动作回归版)")
-
-uploaded_file = st.file_uploader("📂 上传 TXT", type=['txt'])
-
-if uploaded_file:
-    raw = uploaded_file.read().decode("utf-8")
-    flat_input = clean_text_for_ai(raw)
-    input_pure_len = len(normalize_text_for_comparison(flat_input))
-    chunks = smart_split_text(flat_input)
+with col1:
+    st.subheader("1. 上传与处理")
+    uploaded_file = st.file_uploader("选择本地 TXT 文件", type=['txt'])
     
-    st.info(f"原文已就绪：{input_pure_len} 个有效汉字。正在准备按【动作/场景】进行拆解。")
+    if uploaded_file is not None:
+        raw_content = uploaded_file.read().decode("utf-8")
+        
+        # 功能：去除原文所有段落/换行，防止AI偷懒
+        clean_text = "".join(raw_content.split())
+        original_word_count = len(clean_text)
+        
+        st.info(f"✅ 文件已上传 | 原文总字数（已去空格）：{original_word_count}")
+        st.text_area("预处理后的文本流（已去除段落）：", clean_text, height=200)
+        
+        if st.button("🚀 开始生成分镜"):
+            if not api_key:
+                st.error("请输入 API Key")
+            else:
+                # 构造 Prompt
+                system_prompt = f"""你是一个优秀的电影解说工作员和分镜师。
+                任务：将用户提供的文案切分为分镜脚本。
+                规则：
+                1. 严格逐字逐句处理，严禁遗漏、修改或添加原文以外的任何文字。
+                2. 触发逻辑：每个角色对话切换、场景切换、动作画面改变，必须另起一行作为一个新分镜。
+                3. 字数限制：每个分镜文案长度严格控制在 {max_chars_per_shot} 个字符以内（对应5秒音频）。
+                4. 输出格式：每行一个分镜，开头使用数字编号，如：1. 内容... 2. 内容...
+                5. 严禁进行总结，必须保留原文所有细节。"""
+                
+                user_content = f"待处理文本流：\n{clean_text}"
+                
+                try:
+                    with st.spinner("AI 正在分析剧情并生成分镜..."):
+                        headers = {
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json"
+                        }
+                        payload = {
+                            "model": model_id,
+                            "messages": [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_content}
+                            ],
+                            "temperature": 0.3 # 降低随机性，保证不丢字
+                        }
+                        
+                        response = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload)
+                        res_json = response.json()
+                        result = res_json['choices'][0]['message']['content']
+                        
+                        st.session_state['result'] = result
+                except Exception as e:
+                    st.error(f"出错啦：{str(e)}")
 
-    st.markdown("---")
-    
-    if st.button("🚀 开始动作分镜拆解", type="primary"):
-        if not api_key:
-            st.error("请配置 API Key")
+with col2:
+    st.subheader("2. 分镜输出结果")
+    if 'result' in st.session_state:
+        output_text = st.session_state['result']
+        st.text_area("分镜脚本：", output_text, height=450)
+        
+        # 字数统计逻辑：提取分镜中的纯文字，去掉数字和换行
+        clean_output = re.sub(r'\d+\.', '', output_text) # 去掉数字编号
+        clean_output = "".join(clean_output.split())     # 去掉空格和换行
+        output_word_count = len(clean_output)
+        
+        # 数据看板
+        c1, c2, c3 = st.columns(3)
+        c1.metric("原文总字数", original_word_count)
+        c2.metric("输出总字数", output_word_count)
+        diff = output_word_count - original_word_count
+        c3.metric("字数差异", diff, delta_color="inverse" if diff != 0 else "normal")
+        
+        if diff != 0:
+            st.warning(f"⚠️ 注意：输出字数与原文相差 {abs(diff)} 字，请检查是否有遗漏或重复。")
         else:
-            client = OpenAI(api_key=api_key, base_url=base_url)
-            full_results = []
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+            st.success("✨ 校验通过：字数与原文完全一致！")
             
-            # --- V16 核心 Prompt：回归初心 ---
-            system_prompt = """
-            你是一个严格的电影分镜师。
-            请将用户输入的文案，按照【镜头切换逻辑】进行分行处理。
-
-            【必须遵守的 3 大切分规则】：
-            1. **动作改变即切分**：
-               - 如果一句话里包含两个连续动作，必须换行。
-               - 例如：“他把我推倒在床上，开始画画” -> 必须切分为两行：“他把我推倒在床上”、“开始画画”。
-            2. **角色/场景切换即切分**：
-               - 对话人改变，或者时间/地点发生流逝，必须换行。
-            3. **强制长度限制**：
-               - 任何一行不得超过 35 字。如果原文太长，请在标点符号处切开。
-
-            【绝对禁令】：
-            - **严禁修改原文**：不要改字，不要删字，不要加字。
-            - **严禁添加描述**：不要加括号，不要加画面说明，只保留原文。
-            - **不要合并**：不要因为句子短就合并，只要动作变了就必须切！
-            """
-
-            try:
-                for i, chunk in enumerate(chunks):
-                    status_text.markdown(f"**🎬 正在分析第 {i+1}/{len(chunks)} 部分的动作画面...**")
-                    
-                    response = client.chat.completions.create(
-                        model=model_id,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": f"请对以下文本进行分镜切分：\n{chunk}"}
-                        ],
-                        temperature=0.1 # 低温，严谨
-                    )
-                    
-                    # 获取结果并清洗
-                    ai_raw_text = response.choices[0].message.content
-                    # 强制清洗：确保没有括号里的废话
-                    cleaned_text = sanitize_ai_output(ai_raw_text)
-                    
-                    full_results.append(cleaned_text)
-                    progress_bar.progress((i + 1) / len(chunks))
-
-                # 合成
-                combined = "\n".join(full_results)
-                final_lines = [line.strip() for line in combined.split('\n') if line.strip()]
-                
-                # 重建输出
-                final_output_text = ""
-                raw_output_content = ""
-                for idx, line in enumerate(final_lines):
-                    clean = re.sub(r'^\d+[.、]\s*', '', line)
-                    final_output_text += f"{idx+1}. {clean}\n"
-                    raw_output_content += clean
-
-                # --- 结果展示与核对 ---
-                st.success("✅ 分镜拆解完成！")
-                
-                output_pure_len = len(normalize_text_for_comparison(raw_output_content))
-                diff = output_pure_len - input_pure_len
-                
-                # 看板
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("原文汉字数", f"{input_pure_len}")
-                m2.metric("分镜汉字数", f"{output_pure_len}")
-                
-                if diff == 0:
-                    m3.metric("内容完整度", "完美无损 ✅", delta="0", delta_color="normal")
-                else:
-                    m3.metric("偏差值", f"{diff}", delta="异常", delta_color="inverse")
-                    
-                m4.metric("分镜总组数", f"{len(final_lines)}", help="组数越多，说明动作拆解越细致")
-
-                if abs(diff) > 5:
-                    st.error(f"⚠️ 警告：检测到 {abs(diff)} 字的偏差，请检查 AI 是否有遗漏。")
-
-                # 内容区
-                c1, c2 = st.columns([1.5, 1])
-                
-                with c1:
-                    st.subheader("📝 动作分镜脚本")
-                    st.text_area("结果预览", value=final_output_text, height=650)
-                    st.download_button("📥 下载分镜", data=final_output_text, file_name="动作分镜.txt")
-
-                with c2:
-                    st.subheader("📊 画面分析表")
-                    df = parse_df(final_output_text)
-                    st.dataframe(
-                        df,
-                        column_config={
-                            "序号": st.column_config.NumberColumn(width="small"),
-                            "分镜内容": st.column_config.TextColumn(width="large"),
-                            "字数": st.column_config.ProgressColumn(
-                                "画面负荷", 
-                                format="%d", 
-                                min_value=0, 
-                                max_value=40
-                            ),
-                            "类型": st.column_config.TextColumn(width="medium")
-                        },
-                        hide_index=True,
-                        height=650
-                    )
-
-            except Exception as e:
-                st.error(f"❌ 错误: {e}")
+        st.download_button("下载分镜脚本", output_text, file_name="storyboard.txt")
