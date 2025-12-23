@@ -5,12 +5,11 @@ import pandas as pd
 
 # --- 工具函数 ---
 def get_pure_text(text):
-    """提取纯文本内容，用于字数校验"""
     text = re.sub(r'\d+[\.、]\s*', '', text)
     return "".join(text.split())
 
 # --- 页面配置 ---
-st.set_page_config(page_title="解说分镜导演 Pro V5", layout="wide")
+st.set_page_config(page_title="解说分镜导演 Pro V6", layout="wide")
 
 st.sidebar.title("⚙️ 导演工作台配置")
 api_key = st.sidebar.text_input("1. API Key", type="password")
@@ -18,16 +17,16 @@ base_url = st.sidebar.text_input("2. 接口地址", value="https://blog.tuiwen.x
 model_id = st.sidebar.text_input("3. Model ID", value="gpt-4o")
 
 st.sidebar.divider()
-st.sidebar.warning("""
-**🎞️ 分镜刚性指标：**
-1. **35字红线**：单行绝对严禁超过35字。
-2. **0偏差还原**：原文一个字都不能少。
-3. **节奏感**：理想长度为 25-32 字。
+st.sidebar.info("""
+**🎞️ V6 核心逻辑 (满载聚合)：**
+1. **单镜上限**：35 字符。
+2. **拒绝碎片**：除非是动作剧变，否则 15 字以下的句子必须与后文合并。
+3. **填满 5 秒**：目标是让每行接近 25-35 字，使画面与配音节奏完美对齐。
 """)
 
 # --- 主界面 ---
-st.title("🎞️ 电影解说·像素级分镜系统 (V5 高性能版)")
-st.info("已解决：漏字问题。本次优化：解决单镜过长（超35字）问题。")
+st.title("🎞️ 电影解说·像素级分镜系统 (V6 节奏优化版)")
+st.caption("已解决：漏字（0偏差）。本次优化：解决分镜太碎、画面跳动过快问题。")
 
 uploaded_file = st.file_uploader("📂 上传文案 (.txt)", type=['txt'])
 
@@ -39,42 +38,44 @@ if uploaded_file is not None:
     # 顶层看板
     st.subheader("📊 文案稽核数据")
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("待处理总字数", f"{input_len} 字")
+    m1.metric("原文总字数", f"{input_len} 字")
 
     if st.button("🚀 启动深度语义聚合分镜"):
         if not api_key:
             st.error("请配置 API Key")
         else:
             try:
+                # 规范化 URL
                 actual_base = base_url.split('/chat')[0].strip()
                 client = OpenAI(api_key=api_key, base_url=actual_base)
                 
-                with st.spinner('正在进行像素级拆解与字数严控...'):
-                    # --- V5 强化版 Prompt：加入硬性的字数切分逻辑 ---
-                    system_prompt = f"""你是一个高精度电影解说导演。
-任务：将文本拆分为编号分镜，必须同时满足“零字数偏差”和“短小精悍”两个要求。
+                with st.spinner('正在进行高密度语义聚合...'):
+                    # --- V6 满载聚合 Prompt ---
+                    system_prompt = f"""你是一个顶级的解说导演。任务：将文本拆分为分镜。要求极致的字数利用率和 0 字数损失。
 
-【硬性红线 - 必须执行】：
-1. **35字物理极限**：每个编号的内容严禁超过 35 个字符。这是为了配合 5 秒的画面节奏。
-2. **像素还原**：你是原文的搬运工。严禁删减、修改、合并或总结原文。字数偏差必须为 0。
-3. **强行拆分逻辑**：
-   - 如果一句话（从标点到标点）超过了 35 字，你必须在中间寻找逻辑点（如逗号或词语间隙）强行断开，分为两个编号。
-   - 示例：原句有 50 字，你必须拆成 25+25 或 30+20 的两组分镜。
-4. **视觉切分点**：
-   - 只要单行字数达到 25-35 字，即便句子没写完，也优先建议另起一行。
-   - 对话切换、大动作出现，必须换行。
-5. **万能适配**：此指令适用于任何题材（小说、解说、科普、广告）。
+【分镜聚合逻辑 - 核心执行】：
+1. **0 字损失**：严禁删减、总结、改写原文。字数偏差必须为 0。
+2. **35 字封顶原则**：单行分镜严禁超过 35 字。
+3. **满载率要求（拒绝碎片化）**：
+   - 目标：让每个编号里的字数尽量接近 30 字。
+   - 聚合：如果一句话（如“在宫墙下”）只有几个字，**必须**强制与前一句合并，除非合并后总字数超过了 35 字。
+   - 严禁出现大量只有 10 个字的分镜。你要像填桶一样，尽量装满 35 字后再换下一个桶。
+4. **切分触发点**：
+   - 当前分镜字数即将超过 35 字。
+   - 对话的角色发生了切换。
+   - 一个核心的大动作转换。
+5. **万能适配**：此指令适配任何文案，核心是“字数填满”与“动作切换”的平衡。
 
 【输出格式】：
-1.内容内容（严禁任何描述性括号）
+1.内容内容
 2.内容内容
-..."""
+（禁止输出任何多余符号或描述）"""
 
                     response = client.chat.completions.create(
                         model=model_id,
                         messages=[
                             {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": f"请像素级拆解以下文本，确保单行严格在35字以内，不漏字：\n\n{input_stream}"}
+                            {"role": "user", "content": f"请对以下文本进行 0 偏差分镜，尽量让每行填满 30-35 字，不要太碎：\n\n{input_stream}"}
                         ],
                         temperature=0, 
                     )
@@ -92,35 +93,34 @@ if uploaded_file is not None:
                     for i, line in enumerate(lines):
                         content = re.sub(r'^\d+[\.、]\s*', '', line)
                         length = len(content)
-                        status = "✅ 正常" if length <= 35 else "❌ 太长(必断)"
-                        analysis_data.append({"序号": i+1, "内容预览": content[:20]+"...", "长度": length, "状态": status})
+                        status = "✅ 理想" if 25 <= length <= 35 else ("⚠️ 略碎" if length < 25 else "❌ 过长")
+                        analysis_data.append({"序号": i+1, "预览": content[:20]+"...", "长度": length, "状态": status})
                     df = pd.DataFrame(analysis_data)
 
                     # 更新看板
                     m2.metric("生成分镜总数", f"{count} 组")
-                    m3.metric("处理后总字数", f"{output_len} 字")
+                    m3.metric("还原后字数", f"{output_len} 字")
                     diff = output_len - input_len
                     m4.metric("字数偏差", f"{diff} 字")
 
                     st.divider()
 
-                    # 校验结果展示
+                    # 结果区
                     col_res, col_table = st.columns([2, 1])
-                    
                     with col_res:
-                        st.subheader("✍️ 分镜编辑区")
-                        if diff == 0:
-                            st.success("✅ 字数对齐：文字 100% 还原。")
-                        else:
-                            st.error(f"❌ 还原偏差：{diff} 字。")
-                        
-                        st.text_area("直接复制结果", value=result, height=600)
+                        st.subheader("✍️ 分镜编辑器")
+                        if diff == 0: st.success("✅ 字数对齐：100% 还原")
+                        else: st.error(f"❌ 偏差：{diff} 字")
+                        st.text_area("分镜结果内容", value=result, height=600)
 
                     with col_table:
-                        st.subheader("📊 实时节奏分析")
-                        st.table(df)
-                        
-                    st.download_button("💾 下载最终脚本", result, "final_storyboard.txt")
+                        st.subheader("📊 节奏节奏分析")
+                        st.dataframe(df, use_container_width=True)
+                        avg_len = output_len / count if count > 0 else 0
+                        st.metric("平均每镜字数", f"{avg_len:.1f}")
+                        if avg_len < 20: st.warning("提示：分镜依然偏碎，建议检查模型是否过于保守。")
+
+                    st.download_button("💾 下载分镜脚本", result, "script_v6.txt")
 
             except Exception as e:
                 st.error(f"处理失败：{str(e)}")
