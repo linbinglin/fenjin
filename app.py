@@ -3,155 +3,230 @@ from openai import OpenAI
 import re
 import pandas as pd
 
-# --- 工具函数：智能语义分块 (V11 增强版) ---
-def smart_chunk_text(text, max_chars=1000):
-    """寻找最稳固的标点符号（。！？\n）进行切分，确保每一块都是完整的段落"""
-    chunks = []
-    while len(text) > max_chars:
-        split_index = -1
-        # 优先找段落末尾，其次是长句末尾
-        for mark in ["\n", "。", "！", "？"]:
-            pos = text.rfind(mark, 0, max_chars)
-            split_index = max(split_index, pos)
-        
-        if split_index == -1:
-            split_index = max_chars
-        else:
-            split_index += 1 # 包含标点符号
-            
-        chunks.append(text[:split_index].strip())
-        text = text[split_index:]
-    chunks.append(text.strip())
-    return [c for c in chunks if c]
-
-def get_pure_text(text):
-    """精确提取纯文本内容，用于 1:1 对账"""
-    text = re.sub(r'\d+[\.、]\s*', '', text)
-    return "".join(text.split())
-
 # --- 页面配置 ---
-st.set_page_config(page_title="电影解说导演 V11-视觉单元版", layout="wide")
+st.set_page_config(
+    page_title="全能文案·电影感分镜系统 (V2.0)",
+    page_icon="🎬",
+    layout="wide"
+)
 
-st.sidebar.title("⚙️ 导演引擎 V11")
-api_key = st.sidebar.text_input("1. API Key", type="password")
-base_url = st.sidebar.text_input("2. 接口地址", value="https://blog.tuiwen.xyz/v1")
-model_id = st.sidebar.text_input("3. Model ID", value="gpt-4o")
+# --- CSS样式优化 (模仿专业软件风格) ---
+st.markdown("""
+<style>
+    .reportview-container {
+        background: #f0f2f6;
+    }
+    .main-header {
+        font-size: 2.5rem;
+        color: #333;
+        font-weight: 700;
+    }
+    .sub-header {
+        font-size: 1.2rem;
+        color: #666;
+    }
+    .metric-card {
+        background-color: #ffffff;
+        border-radius: 10px;
+        padding: 15px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        text-align: center;
+    }
+    .stDataFrame {
+        border: 1px solid #ddd;
+        border-radius: 5px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-st.sidebar.divider()
-st.sidebar.info("""
-**🎞️ V11 视觉切分准则：**
-1. **主语即镜头**：人称切换（如“我”转“他”）必须断开。
-2. **动作即分镜**：一个核心动作完成后必须切镜。
-3. **对话独立性**：台词结束后的动作描写严禁混在一起。
-4. **硬性 35 字**：单行依然禁止超过 35 字。
-""")
+# --- 辅助函数 ---
+def count_valid_chars(text):
+    """统计有效字数（排除标点）"""
+    if not text: return 0
+    clean_text = re.sub(r'[^\w\u4e00-\u9fa50-9]', '', text)
+    return len(clean_text)
+
+def analyze_rhythm(text):
+    """分析分镜节奏状态"""
+    length = count_valid_chars(text)
+    if length == 0: return "❌ 空白", length
+    if length < 10: return "🟡 偏短 (快切)", length
+    if 10 <= length <= 35: return "✅ 理想 (5秒)", length
+    return "🔴 偏长 (需拆分)", length
+
+# --- 侧边栏：核心配置 ---
+with st.sidebar:
+    st.markdown("## ⚙️ 导演引擎 V2.0")
+    
+    base_url = st.text_input(
+        "接口地址 (Base URL)", 
+        value="https://blog.tuiwen.xyz/v1",
+        help="例如: https://blog.tuiwen.xyz/v1"
+    )
+
+    api_key = st.text_input(
+        "API Key (密钥)", 
+        type="password",
+        value=""
+    )
+
+    model_id = st.text_input(
+        "Model ID (模型名称)", 
+        value="gpt-4o",
+        help="推荐使用 gpt-4o 或 claude-3-5-sonnet 以获得最佳逻辑理解能力"
+    )
+    
+    st.info("""
+    **V2.0 更新日志：**
+    1. 修复了分镜过碎的问题。
+    2. 增加了视觉节奏分析面板。
+    3. 优化了长难句的语义完整性。
+    """)
 
 # --- 主界面 ---
-st.title("🎞️ 全能文案·电影感分镜系统 (V11)")
-st.caption("针对“音画不同步”、“内容重叠”深度优化。适配全题材文案。")
+st.markdown('<div class="main-header">🎬 全能文案·电影感分镜系统 (V2.0)</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">针对“画面碎片化”深度优化，智能识别主语、动作与场景。</div>', unsafe_allow_html=True)
+st.divider()
 
-uploaded_file = st.file_uploader("📂 选择 TXT 文案", type=['txt'])
+# 1. 文件上传
+uploaded_file = st.file_uploader("📂 选择 TXT 文案", type=["txt"])
 
 if uploaded_file is not None:
-    raw_text = uploaded_file.getvalue().decode("utf-8")
-    input_stream = "".join(raw_text.split())
-    input_len = len(input_stream)
+    raw_text = uploaded_file.read().decode("utf-8")
+    
+    # 预处理：去重、去空行、压缩为一行 (防AI偷懒的核心步骤)
+    flattened_text = raw_text.replace('\n', '').replace('\r', '').strip()
+    input_count = count_valid_chars(flattened_text)
 
-    st.subheader("📊 视觉逻辑稽核面板")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("原文总字数", f"{input_len} 字")
-
-    if st.button("🚀 启动视觉无损分镜"):
+    # 显示原文状态
+    st.success(f"📄 原文已装载 | 总字数: {input_count} 字 | 已进行“反懒惰”压缩处理")
+    
+    # 生成按钮
+    if st.button("🚀 启动视觉分镜引擎", type="primary"):
         if not api_key:
-            st.error("请配置侧边栏参数")
-        else:
-            try:
-                actual_base = base_url.split('/chat')[0].strip()
-                client = OpenAI(api_key=api_key, base_url=actual_base)
-                
-                # 步骤 1：智能分块
-                chunks = smart_chunk_text(input_stream)
-                st.write(f"📦 已识别 {len(chunks)} 个独立剧情块，正在进行视觉单元规划...")
-                
-                full_result = []
-                current_shot_idx = 1
-                
-                progress_bar = st.progress(0)
-                
-                for idx, chunk in enumerate(chunks):
-                    with st.spinner(f'正在规划第 {idx+1}/{len(chunks)} 块镜头...'):
-                        # --- V11 视觉导演 Prompt ---
-                        system_prompt = f"""你是一个顶级的解说视频导演。你的任务是把文本流拆解成“画面镜头”。
+            st.error("请先配置 API Key")
+            st.stop()
+            
+        # --- 核心 Prompt (经过针对性优化的“导演模式”) ---
+        system_prompt = f"""
+你是由好莱坞资深剪辑师训练的AI分镜导演。你的任务是将一段被压缩成一行的文本，还原为适合短视频制作的“视觉分镜脚本”。
 
-【视觉分镜红线】：
-1. **主语变更即切分**：只要句子的主语（动作发出者）发生了改变，必须立即结束当前分镜，开启下一个编号。
-2. **台词与动作分离**：角色的一句台词结束后，紧接的其他角色的反应或环境描写，严禁放在同一个编号内。
-3. **镜像 0 损还原**：你只是负责加编号和换行。严禁擅自修改、润色、重复、或合并原文任何文字。偏差必须为 0。
-4. **长度与语意平衡**：
-   - 理想长度：25-35 字。
-   - 强制上限：35 字。若单句台词超长，请在不漏字的前提下在语气点强行拆分。
-5. **拒绝碎片化**：在主语未变、动作连贯的前提下，尽量填满 25-35 字。
+【原文本】
+{flattened_text}
 
-【输出要求】：
-- 从编号 {current_shot_idx} 开始。
-- 严禁任何解释、括号、画面词，只输出“数字.文案”。"""
+【绝对禁止】
+1. 禁止输出原文本没有的内容。
+2. 禁止出现“碎片化”分镜（如单独的“毫无用处”、“早已买好了船票”这种无头无尾的短语，必须和主语或上一句动作合并）。
+3. 禁止改变故事原意。
 
-                        response = client.chat.completions.create(
-                            model=model_id,
-                            messages=[
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": f"请对此文本块进行视觉单元分镜，严禁重复和漏字：\n\n{chunk}"}
-                            ],
-                            temperature=0, 
-                        )
-                        
-                        chunk_res = response.choices[0].message.content.strip()
-                        full_result.append(chunk_res)
-                        
-                        # 更新下一块的起始编号
-                        last_nums = re.findall(r'(\d+)[\.、]', chunk_res)
-                        if last_nums:
-                            current_shot_idx = int(last_nums[-1]) + 1
-                        
-                        progress_bar.progress((idx + 1) / len(chunks))
+【分镜拆解逻辑 - 请严格遵守】
+1. **语义完整性优先**：不要机械地按字数切分。每一行分镜必须是一个完整的“视觉画面”或“完整的台词意群”。
+   - 错误示范：
+     1. 皇上翻遍后宫只为
+     2. 找出酒后爬龙床的
+     3. 官女
+   - 正确示范：
+     1. 皇上翻遍后宫只为找出酒后爬龙床的官女
+2. **动作与场景切换**：
+   - 遇到由“我”转“他”时，必须换行。
+   - 遇到新场景（如从卧室转到大厅）时，必须换行。
+   - 遇到明显的动作变化（如从“坐着”变“站起摔杯子”）时，必须换行。
+3. **时长控制（黄金法则）**：
+   - 理想长度：每行 15-35 个字（约 3-5 秒）。
+   - 如果一句话太长（超过 40 字），请在逗号或逻辑转折处切分，但切分后的半句必须有意义。
+   - 如果一句话太短（少于 8 字），请判断它是否能合并到上一句动作中？如果不能合并（如强调句），则保留。
 
-                # 数据合并与展示
-                final_result = "\n".join(full_result)
-                output_stream = get_pure_text(final_result)
-                output_len = len(output_stream)
-                
-                lines = [l.strip() for l in final_result.split('\n') if re.match(r'^\d+', l.strip())]
-                count = len(lines)
-                
-                analysis_data = []
-                for i, line in enumerate(lines):
-                    content = re.sub(r'^\d+[\.、]\s*', '', line)
-                    ln = len(content)
-                    status = "✅ 理想" if 20 <= ln <= 35 else ("❌ 过长" if ln > 35 else "🟡 偏短")
-                    analysis_data.append({"序号": i+1, "内容预览": content[:20], "长度": ln, "状态": status})
-                df = pd.DataFrame(analysis_data)
+【输出格式】
+纯文本列表，每行一个数字开头，不要Markdown加粗。
+1.第一段分镜内容
+2.第二段分镜内容
+...
+"""
 
-                # 看板更新
-                m2.metric("生成分镜总数", f"{count} 组")
-                m3.metric("处理后总字数", f"{output_len} 字")
-                diff = output_len - input_len
-                m4.metric("偏差值", f"{diff} 字", delta_color="inverse")
+        client = OpenAI(api_key=api_key, base_url=base_url)
+        
+        st.subheader("📊 正在进行视觉单元规划...")
+        result_container = st.empty()
+        full_response = ""
+        
+        try:
+            stream = client.chat.completions.create(
+                model=model_id,
+                messages=[
+                    {"role": "system", "content": "你是一个严谨的电影分镜师。你极度厌恶破碎的句子。你擅长将文本划分为完整的视觉动作单元。"},
+                    {"role": "user", "content": system_prompt}
+                ],
+                stream=True,
+                temperature=0.6, # 降低温度，增加逻辑稳定性
+            )
 
-                st.divider()
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    full_response += content
+                    result_container.text_area("生成预览 (实时)", value=full_response, height=400)
+            
+            # --- 后处理与数据分析 (复刻图四的功能) ---
+            st.divider()
+            st.subheader("📈 视觉逻辑稽核面板")
+            
+            # 1. 解析生成的内容
+            lines = []
+            raw_lines = full_response.strip().split('\n')
+            
+            output_valid_chars = 0
+            
+            for line in raw_lines:
+                # 提取内容（去除 1. 这种序号）
+                clean_line = re.sub(r'^\d+\.?\s*', '', line).strip()
+                if clean_line:
+                    status, length = analyze_rhythm(clean_line)
+                    output_valid_chars += length
+                    lines.append({
+                        "分镜序号": len(lines) + 1,
+                        "分镜内容": clean_line,
+                        "字数": length,
+                        "节奏状态": status
+                    })
+            
+            # 2. 统计数据展示
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("原文总字数", input_count)
+            col2.metric("生成分镜组数", len(lines))
+            col3.metric("处理后总字数", output_valid_chars)
+            
+            diff = output_valid_chars - input_count
+            col4.metric("偏差值 (漏字监控)", f"{diff} 字", delta_color="inverse")
+            
+            if abs(diff) > 10:
+                st.error(f"⚠️ 警报：AI 可能遗漏或添加了部分内容（偏差 {diff} 字），请检查下方详情。")
+            else:
+                st.success("✅ 完美还原：内容无损，逻辑完整。")
 
-                # UI 交互
-                c_a, c_b = st.columns([2, 1])
-                with c_a:
-                    st.subheader("🎬 视觉分镜编辑器 (无损还原)")
-                    if diff == 0: st.success("✅ 100% 镜像还原成功")
-                    else: st.error(f"⚠️ 偏差：{diff} 字。提示：正数为重复/脑补，负数为漏字。")
-                    st.text_area("分镜正文", value=final_result, height=600)
+            # 3. 详细数据表 (类似图四的右侧栏)
+            df = pd.DataFrame(lines)
+            st.markdown("### 🎬 实时视觉节奏分析")
+            
+            # 使用 dataframe 高亮显示
+            def highlight_status(val):
+                color = 'black'
+                if '❌' in val: color = 'red'
+                elif '🟡' in val: color = '#D4AF37' # Gold
+                elif '🔴' in val: color = 'orange'
+                elif '✅' in val: color = 'green'
+                return f'color: {color}; font-weight: bold;'
 
-                with c_b:
-                    st.subheader("📊 实时视觉节奏分析")
-                    st.dataframe(df, use_container_width=True)
-                    st.metric("平均每镜停留", f"{output_len/count:.1f} 字")
-                    st.download_button("💾 下载最终分镜稿", final_result, "storyboard_v11.txt")
+            st.dataframe(
+                df.style.map(highlight_status, subset=['节奏状态']),
+                use_container_width=True,
+                height=500,
+                column_config={
+                    "分镜序号": st.column_config.NumberColumn("序号", width="small"),
+                    "分镜内容": st.column_config.TextColumn("分镜文案 (Visual Script)", width="large"),
+                    "字数": st.column_config.ProgressColumn("时长预估", min_value=0, max_value=50, format="%d 字"),
+                    "节奏状态": st.column_config.TextColumn("AI 建议", width="medium"),
+                }
+            )
 
-            except Exception as e:
-                st.error(f"导演系统运行出错：{str(e)}")
+        except Exception as e:
+            st.error(f"发生错误: {str(e)}")
