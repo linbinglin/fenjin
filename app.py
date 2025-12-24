@@ -1,226 +1,98 @@
 import streamlit as st
-from openai import OpenAI
-import re
-import time
+import requests
+import json
+import os
 
-# ====================
-# 1. 页面配置与状态初始化
-# ====================
-st.set_page_config(
-    page_title="全能文案·电影感分镜系统 (V16 视觉节奏版)",
-    page_icon="🎬",
-    layout="wide"
-)
+# --- 页面配置 ---
+st.set_page_config(page_title="精密分镜助理 V1.0", layout="wide")
+st.title("🎬 自动文案分镜拆解系统")
+st.caption("基于电影解说逻辑：35字/5秒准则 | 场景切换逻辑 | 零文本损耗")
 
-if 'init' not in st.session_state:
-    st.session_state['init'] = True
-    st.session_state['result'] = ""
-    st.session_state['orig_len'] = 0
-    st.session_state['final_len'] = 0
-    st.session_state['deviation'] = 0
-    st.session_state['shots'] = 0
-    st.session_state['chunks'] = 0
-
-st.markdown("""
-<style>
-    .main-header {font-size: 2rem; font-weight: bold; margin-bottom: 1rem;}
-    .stat-box {
-        background-color: #f8f9fa;
-        padding: 20px;
-        border-radius: 8px;
-        text-align: center;
-        border: 1px solid #ddd;
-    }
-    .stat-value {font-size: 2rem; font-weight: bold; color: #333;}
-    textarea {
-        font-family: 'Courier New', Courier, monospace; 
-        font-size: 16px !important;
-        line-height: 1.8 !important;
-    }
-    .stProgress > div > div > div > div {
-        background-color: #007bff;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# ====================
-# 2. 侧边栏
-# ====================
+# --- 侧边栏：API 配置 ---
 with st.sidebar:
-    st.markdown("### ⚙️ 导演引擎 V16")
+    st.header("⚙️ 模型配置")
+    api_url = st.text_input("API 中转地址", value="https://blog.tuiwen.xyz/v1/chat/completions")
     api_key = st.text_input("API Key", type="password")
-    base_url = st.text_input("接口地址", value="https://blog.tuiwen.xyz/v1")
     
-    model_options = ["deepseek-chat", "gpt-4o", "claude-3-5-sonnet", "gemini-pro", "grok-beta", "自定义"]
-    selected_model = st.selectbox("Model ID", model_options)
+    model_options = [
+        "deepseek-chat", 
+        "gpt-4o", 
+        "claude-3-5-sonnet-20240620", 
+        "gemini-1.5-pro", 
+        "grok-1",
+        "doubao-pro-128k"
+    ]
+    selected_model = st.text_input("Model ID (手动输入或选择)", value="deepseek-chat")
     
-    if selected_model == "自定义":
-        model_id = st.text_input("输入模型名称", value="grok-4.1")
-    else:
-        model_id = selected_model
-        
-    st.info("ℹ️ V16升级：已启用“贪婪聚合”策略。AI将尽可能合并短句，使单镜字数接近35字，大幅减少碎片化分镜。")
+    st.divider()
+    st.info("较真提醒：分镜逻辑严格遵循每段不超过35个字符，确保音频对齐。")
 
-# ====================
-# 3. 核心逻辑
-# ====================
+# --- 核心提示词（助理角色设定） ---
+SYSTEM_PROMPT = """你是一个极其严谨、较真的电影解说分镜专家。
+你的任务是将用户提供的【原始文本】重新排列为【分镜脚本】。
 
-def clean_text_for_count(text):
-    if not text: return ""
-    pattern = re.compile(r'[^\u4e00-\u9fa5a-zA-Z0-9]')
-    return re.sub(pattern, '', text)
-
-def smart_sentence_split(text, max_chars=800):
-    """
-    分块给予AI足够的上下文（800字），让它有空间进行合并。
-    """
-    chunks = []
-    current_chunk = ""
-    parts = re.split(r'(。|！|？|\n)', text)
-    temp_sentence = ""
-    for part in parts:
-        temp_sentence += part
-        if part in ["。", "！", "？", "\n"]:
-            if len(current_chunk) + len(temp_sentence) > max_chars:
-                if current_chunk: chunks.append(current_chunk)
-                current_chunk = temp_sentence
-            else:
-                current_chunk += temp_sentence
-            temp_sentence = ""
-    if temp_sentence: current_chunk += temp_sentence
-    if current_chunk: chunks.append(current_chunk)
-    return chunks
-
-def process_chunk_merge_v16(client, model, text_chunk, index, total):
-    """
-    【V16 核心修正：贪婪聚合 Prompt】
-    指令核心：除非字数爆了，否则死都不换行。
-    """
-    system_prompt = f"""
-你是一个专业的【视频节奏剪辑师】。
-你的目标是将原本琐碎的文案，合并成流畅的“画面脚本”。
-
-【核心原则 - 必须严格遵守】：
-1. **贪婪合并（关键）**：不要看到逗号就换行！请尽可能将连续的短句合并在同一行，**凑够 25-35 个字**。
-   - 错误示例：
-     1.皇上翻遍后宫
-     2.只为找出那个宫女
-   - 正确示例（合并）：
-     1.皇上翻遍后宫，只为找出那个酒后爬龙床的宫女
-
-2. **换行标准**：只有满足以下任一条件时，才允许换行：
-   - 当前行字数已超过 **35个字**（这是硬性视觉上限）。
-   - 发生了明显的**场景切换**（如从回忆回到现实）。
-   - 发生了**角色对话**切换（A说完B说）。
-
-3. **零偏差**：你可以合并行，但**绝对禁止**修改、删除或增加原文的任何一个汉字。
-
-4. **输出格式**：纯文本，以数字序号开头。
-
-这是文案的第 {index+1}/{total} 部分，请开始处理：
+执行准则（绝不可违背）：
+1. **零损耗原则**：禁止修改、添加或删除原文中的任何一个字。必须保证原文的所有文字按顺序完整出现。
+2. **强制分镜逻辑**：
+   - 场景转换、角色对话切换、画面动作改变时，必须另起一个分镜序号。
+   - **时间对齐约束**：每个分镜的文字长度严格控制在 15-35 个字符之间。如果原句过长，必须在不改变文字的前提下，根据停顿感拆分为多个分镜，以确保单段音频不超过5秒。
+3. **消除段落干扰**：忽略输入文本原有的段落格式，将其视为连续流处理，重新根据叙事逻辑和长度限制进行分号。
+4. **输出格式**：
+   直接输出带序号的分镜列表，格式如下：
+   1.分镜内容
+   2.分镜内容
+   （禁止输出任何开场白、解释或总结语）
 """
+
+def call_ai_api(text):
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    # 清理文本：去掉原有换行，强制AI重新审视结构
+    cleaned_text = text.replace("\n", "").replace("\r", "").strip()
+    
+    payload = {
+        "model": selected_model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"请对以下文本进行分镜处理，记住，不准改动原文任何字句：\n\n{cleaned_text}"}
+        ],
+        "temperature": 0.3  # 低随机性，保证严谨
+    }
+    
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text_chunk}
-            ],
-            stream=False,
-            temperature=0.2 # 稍微提高一点点温度，允许它进行合并操作的逻辑判断
-        )
-        return response.choices[0].message.content
+        response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+        response.raise_for_status()
+        return response.json()['choices'][0]['message']['content']
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"发生错误：{str(e)}"
 
-# ====================
-# 4. 主程序
-# ====================
+# --- 主界面 ---
+uploaded_file = st.file_uploader("选择本地 .txt 文案文件", type=['txt'])
 
-st.markdown('<div class="main-header">🎬 全能文案·电影感分镜系统 (V16)</div>', unsafe_allow_html=True)
-
-uploaded_file = st.file_uploader("📂 选择 TXT 文案", type=['txt'])
-
-if uploaded_file and api_key:
-    raw_content = uploaded_file.read().decode("utf-8")
-    # 预处理：去除原文的所有换行符，把文本变成一条长龙，方便AI重新剪辑
-    clean_input_stream = raw_content.replace("\n", "").replace("\r", "")
-    orig_len = len(clean_text_for_count(clean_input_stream))
+if uploaded_file is not None:
+    # 读取文件
+    original_text = uploaded_file.read().decode("utf-8")
     
-    st.caption(f"📄 原文加载成功，共 {orig_len} 纯字。正在进行视觉节奏重组...")
-
-    if st.button("🚀 启动视觉分镜 (合并模式)", type="primary"):
-        
-        # 使用较大的块(800字)以利于合并
-        chunks = smart_sentence_split(clean_input_stream, max_chars=800)
-        total_chunks = len(chunks)
-        
-        progress_bar = st.progress(0)
-        status_box = st.empty()
-        full_results = []
-        
-        client = OpenAI(api_key=api_key, base_url=base_url)
-        
-        for i, chunk in enumerate(chunks):
-            status_box.markdown(f"**⚡ 正在处理第 {i+1}/{total_chunks} 剧情块...** (正在执行短句聚合)")
-            
-            res = process_chunk_merge_v16(client, model_id, chunk, i, total_chunks)
-            
-            if "Error" in res:
-                st.error(res)
-                break
-                
-            lines = res.split('\n')
-            for line in lines:
-                # 提取内容
-                cleaned = re.sub(r'^[\d\s\.\、]+', '', line).strip()
-                if cleaned:
-                    full_results.append(cleaned)
-            
-            progress_bar.progress((i + 1) / total_chunks)
-            
-        if full_results:
-            final_text = ""
-            combined_clean = ""
-            for idx, txt in enumerate(full_results):
-                final_text += f"{idx + 1}.{txt}\n"
-                combined_clean += txt
-            
-            st.session_state['result'] = final_text
-            st.session_state['orig_len'] = orig_len
-            st.session_state['final_len'] = len(clean_text_for_count(combined_clean))
-            st.session_state['deviation'] = st.session_state['final_len'] - orig_len
-            st.session_state['shots'] = len(full_results)
-            
-            status_box.success("✅ 视觉分镜规划完成！短句已自动聚合。")
-            time.sleep(0.5)
-            st.rerun()
-
-# ====================
-# 5. 结果面板
-# ====================
-
-if st.session_state['result']:
-    result = st.session_state['result']
-    orig = st.session_state['orig_len']
-    final = st.session_state['final_len']
-    dev = st.session_state['deviation']
-    shots = st.session_state['shots']
+    col1, col2 = st.columns(2)
     
-    st.markdown("---")
+    with col1:
+        st.subheader("📄 原始文案")
+        st.text_area("内容预览", original_text, height=400)
     
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.markdown(f'<div class="stat-box"><div class="stat-label">原文纯字数</div><div class="stat-value">{orig}</div></div>', unsafe_allow_html=True)
-    with c2:
-        # 这里的数字应该会显著下降
-        st.markdown(f'<div class="stat-box" style="border: 2px solid #007bff;"><div class="stat-label">生成分镜总数 (已合并)</div><div class="stat-value">{shots} 组</div></div>', unsafe_allow_html=True)
-    with c3:
-        st.markdown(f'<div class="stat-box"><div class="stat-label">处理后纯字数</div><div class="stat-value">{final}</div></div>', unsafe_allow_html=True)
-    with c4:
-        color = "#28a745" if dev == 0 else "#dc3545"
-        st.markdown(f'<div class="stat-box"><div class="stat-label">偏差值</div><div class="stat-value" style="color:{color}">{dev} 字</div></div>', unsafe_allow_html=True)
-        
-    st.markdown("### 📝 视觉分镜编辑器")
-    st.text_area("分镜结果", value=result, height=800)
-    st.download_button("📥 下载 .txt", result, "storyboard_v16.txt")
+    if st.button("🚀 开始自动化精密分镜"):
+        if not api_key:
+            st.error("请先在左侧输入 API Key")
+        else:
+            with st.spinner("助理正在逐字分析剧情，请稍候..."):
+                result = call_ai_api(original_text)
+                with col2:
+                    st.subheader("🎬 分镜结果")
+                    st.text_area("分镜脚本", result, height=400)
+                    st.download_button("导出分镜脚本", result, file_name="storyboard.txt")
+
+# --- 底部工作日志 ---
+st.divider()
+st.caption("较真助理日志：待命。已准备好处理任何长度的文本流。")
