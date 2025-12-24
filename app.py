@@ -1,227 +1,240 @@
 import streamlit as st
 from openai import OpenAI
 import re
-import pandas as pd
-import time
 
-# --- 页面配置 ---
+# ====================
+# 1. 页面配置与样式
+# ====================
 st.set_page_config(
-    page_title="分镜引擎 V4.0 (智能缝合版)",
+    page_title="全能文案·电影感分镜系统 (V11)",
     page_icon="🎬",
     layout="wide"
 )
 
-# --- CSS样式 ---
+# 自定义CSS以接近截图风格
 st.markdown("""
 <style>
-    .main-header { font-size: 2.2rem; color: #333; font-weight: 700; }
-    .stDataFrame { border: 1px solid #ddd; }
-    div[data-testid="stMetricValue"] { font-size: 1.2rem; }
+    .main-header {font-size: 2rem; font-weight: bold; margin-bottom: 1rem;}
+    .sub-header {font-size: 1.2rem; font-weight: bold; margin-top: 2rem; color: #444;}
+    .stat-box {
+        background-color: #f0f2f6;
+        padding: 20px;
+        border-radius: 10px;
+        text-align: center;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .stat-value {font-size: 2rem; font-weight: bold; color: #31333F;}
+    .stat-label {font-size: 1rem; color: #666;}
+    .stTextArea textarea {font-size: 16px; line-height: 1.6;}
+    .success-text {color: green; font-weight: bold;}
+    .error-text {color: red; font-weight: bold;}
 </style>
 """, unsafe_allow_html=True)
 
-# --- 核心工具函数 ---
-
-def count_valid_chars(text):
-    """统计有效字数"""
-    if not text: return 0
-    clean_text = re.sub(r'[^\w\u4e00-\u9fa50-9]', '', text)
-    return len(clean_text)
-
-def analyze_rhythm(text):
-    """分析分镜节奏状态"""
-    length = count_valid_chars(text)
-    if length == 0: return "❌ 空白", length
-    if length < 10: return "🟡 较短 (快节奏)", length
-    if 10 <= length <= 38: return "✅ 完美 (5秒)", length
-    return "🔴 较长 (需关注)", length
-
-def smart_chunking(text, max_chunk_size=1000):
-    """分块防止幻觉"""
-    sentences = re.split(r'(?<=[。！？!?])', text)
-    chunks = []
-    current_chunk = ""
-    for sentence in sentences:
-        if len(current_chunk) + len(sentence) < max_chunk_size:
-            current_chunk += sentence
-        else:
-            if current_chunk: chunks.append(current_chunk)
-            current_chunk = sentence
-    if current_chunk: chunks.append(current_chunk)
-    return chunks
-
-def post_process_merge(lines, max_chars=35, min_chars=12):
-    """
-    【V4.0 核心算法：视觉胶水】
-    强制遍历 AI 输出的列表。
-    如果发现某行太短（< min_chars），且加上下一行不超过 max_chars，
-    则强制合并，治愈“碎片症”。
-    """
-    if not lines: return []
-    
-    merged_lines = []
-    buffer = lines[0] # 初始化缓冲区
-    
-    for i in range(1, len(lines)):
-        current_line = lines[i]
-        buffer_len = count_valid_chars(buffer)
-        current_len = count_valid_chars(current_line)
-        
-        # 核心判断逻辑：
-        # 1. 如果缓冲区太短 (比如 "毫无用处" 4个字)
-        # 2. 并且合并后总长度不仅没有超标
-        # 3. 或者缓冲区本身没有结尾标点（说明话没说完）
-        should_merge = False
-        
-        # 规则 A: 极短碎片强制合并
-        if buffer_len < min_chars and (buffer_len + current_len <= max_chars):
-            should_merge = True
-        
-        # 规则 B: 话没说完（无标点）尝试合并
-        if not re.search(r'[。！？!?]$', buffer) and (buffer_len + current_len <= max_chars):
-             should_merge = True
-
-        if should_merge:
-            buffer += current_line # 缝合
-        else:
-            merged_lines.append(buffer) # 释放缓冲区
-            buffer = current_line # 新的缓冲区
-            
-    merged_lines.append(buffer) # 最后的残留
-    return merged_lines
-
-# --- 侧边栏 ---
+# ====================
+# 2. 侧边栏配置 (API设置)
+# ====================
 with st.sidebar:
-    st.markdown("## ⚙️ 引擎设置 V4.0")
-    base_url = st.text_input("Base URL", value="https://blog.tuiwen.xyz/v1")
-    api_key = st.text_input("API Key", type="password")
-    model_id = st.text_input("Model ID", value="gpt-4o")
+    st.markdown("### ⚙️ 导演引擎 V11 设置")
     
-    st.divider()
-    st.markdown("### 🔧 碎片修复强度")
-    min_merge_len = st.slider("最小分镜字数 (低于此值将尝试合并)", 5, 20, 12, 
-                              help="如果分镜小于这个字数，算法会强制将其与下一行合并（除非合并后太长）。调大此值可减少碎片。")
+    api_key = st.text_input("API Key", type="password", help="请输入你的API Key")
+    base_url = st.text_input("接口地址 (Base URL)", value="https://blog.tuiwen.xyz/v1", help="第三方中转接口地址")
+    
+    # 模型选择 (预设 + 自定义)
+    model_options = ["deepseek-chat", "gpt-4o", "claude-3-5-sonnet", "gemini-pro", "grok-beta", "自定义"]
+    selected_model = st.selectbox("Model ID (模型选择)", model_options)
+    
+    if selected_model == "自定义":
+        model_id = st.text_input("请输入自定义模型名称")
+    else:
+        model_id = selected_model
 
-# --- 主界面 ---
-st.markdown('<div class="main-header">🎬 分镜引擎 V4.0 (智能缝合版)</div>', unsafe_allow_html=True)
-st.markdown("##### 🚀 核心特性：分块抗幻觉 + Python视觉胶水(修复碎片)")
-st.divider()
+    st.info("💡 提示：请确保你的账户余额充足。")
 
-uploaded_file = st.file_uploader("📂 选择 TXT 文案", type=["txt"])
+# ====================
+# 3. 工具函数
+# ====================
+
+def clean_text_for_count(text):
+    """
+    去除所有标点符号和空格，只保留汉字、字母、数字。
+    用于精准比对字数，防止标点差异导致的误判。
+    """
+    if not text:
+        return ""
+    # 正则：排除所有非单词字符（但保留中文）
+    # \u4e00-\u9fa5 是中文字符范围
+    pattern = re.compile(r'[^\u4e00-\u9fa5a-zA-Z0-9]')
+    return re.sub(pattern, '', text)
+
+def process_storyboard(client, model, text):
+    """
+    调用LLM进行分镜处理
+    """
+    # 核心指令：严格按照用户要求的8点逻辑编写
+    system_prompt = f"""
+你是一个优秀的电影解说分镜员。请严格按照以下规则对用户提供的文本进行分镜处理：
+
+1. **逐字逐句理解**：理解文本内容，不能遗漏任何信息。
+2. **分镜触发条件**：
+   - 角色对话切换时。
+   - 场景切换时。
+   - 动作画面发生改变时。
+   - 上述情况发生时，必须设定为下一个分镜。
+3. **绝对完整性**：整理后的内容**不可遗漏原文中的任何一句话、一个字**，不能改变原文故事结构，**禁止添加**原文以外的任何内容（如“镜头描述”、“画面指令”等，只保留原文文案）。
+4. **格式要求**：每组分镜前标上数字序号（1. 2. 3. ...），每组分镜独占一行。
+5. **分镜逻辑**：当故事从一个场景切换到另一个场景时，请务必另起新的分镜。
+6. **时长限制**：每个分镜文案严格控制在 **35个字符以内**（对应约5秒视频时长）。如果原句过长，必须在符合语义逻辑的地方进行切分，确保不超过35字。
+7. **数据源处理**：请忽略原文的段落格式，将其视为连续的文本流重新进行分镜规划。
+
+输出示例：
+1.8岁那年家里穷得揭不开锅了
+2.怀孕的母亲带着我在寺外乞讨
+3.我把僧人端来的粥饭全给了母亲
+4.施粥的将军府老妇人，让人领我过来问
+5.都饿成人干了怎么不吃
+
+现在，请对以下文本进行分镜处理：
+"""
+    
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text}
+            ],
+            stream=False,
+            temperature=0.7 
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"Error: {e}"
+
+# ====================
+# 4. 主界面逻辑
+# ====================
+
+st.markdown('<div class="main-header">🎬 全能文案·电影感分镜系统 (V11)</div>', unsafe_allow_html=True)
+st.markdown('针对“音画不同步”、“内容重叠”深度优化。适配全题材文案。')
+
+# 文件上传区域
+uploaded_file = st.file_uploader("📂 选择 TXT 文案", type=['txt'])
 
 if uploaded_file is not None:
-    raw_text = uploaded_file.read().decode("utf-8")
-    flattened_text = raw_text.replace('\n', '').replace('\r', '').strip()
-    input_count = count_valid_chars(flattened_text)
-
-    st.success(f"原文装载完毕 | {input_count} 字")
+    # 读取文件
+    raw_content = uploaded_file.read().decode("utf-8")
     
-    if st.button("⚡ 启动生成", type="primary"):
+    # 预处理：删除原文的所有换行符，强制变成一行，防止AI偷懒
+    processed_input_text = raw_content.replace("\n", "").replace("\r", "")
+    
+    # 计算原文纯净字数
+    original_clean_count = len(clean_text_for_count(processed_input_text))
+    
+    st.markdown("### 📄 原文预览 (已自动去除段落格式)")
+    with st.expander("点击查看待处理文本", expanded=False):
+        st.write(processed_input_text)
+
+    # 提交按钮
+    if st.button("🚀 启动视觉无损分镜", type="primary"):
         if not api_key:
-            st.error("缺少 API Key"); st.stop()
+            st.error("❌ 请先在左侧侧边栏设置 API Key")
+        else:
+            with st.spinner('正在分析剧情、拆解分镜、计算时长逻辑... (AI正在思考)'):
+                # 初始化客户端
+                try:
+                    client = OpenAI(api_key=api_key, base_url=base_url)
+                    
+                    # 调用AI
+                    result_text = process_storyboard(client, model_id, processed_input_text)
+                    
+                    # 如果返回的是错误信息
+                    if result_text.startswith("Error"):
+                        st.error(result_text)
+                    else:
+                        st.session_state['result'] = result_text
+                        st.session_state['original_count'] = original_clean_count
+                        st.session_state['raw_input'] = raw_content # 保存原始输入以供对比
+                        
+                except Exception as e:
+                    st.error(f"连接失败: {e}")
 
-        # 1. 智能分块
-        chunks = smart_chunking(flattened_text)
-        client = OpenAI(api_key=api_key, base_url=base_url)
-        
-        raw_ai_lines = []
-        progress_bar = st.progress(0)
-        status = st.empty()
-        
-        # 2. AI 粗剪
-        for i, chunk in enumerate(chunks):
-            status.text(f"正在分析第 {i+1}/{len(chunks)} 区块...")
-            
-            # Prompt 侧重于语义完整性，不再过分强调短句，因为后面有Python代码把关
-            system_prompt = f"""
-你是一个专业分镜师。请对以下文本进行分镜处理。
+# ====================
+# 5. 结果展示与视觉逻辑稽核面板
+# ====================
 
-【重要原则】
-1. **优先保持语义完整**：不要为了换行而切断“主语-谓语-宾语”结构。
-   - 错误：最终柳丞相 / 和贵妃 / 被判处腰斩
-   - 正确：最终柳丞相和贵妃被判处腰斩
-2. **禁止幻觉**：绝对不要增加原文没有的字，不要删减。
-3. **换行逻辑**：仅在“动作切换”、“场景切换”或“句子确实太长(>35字)”时换行。
+if 'result' in st.session_state:
+    result = st.session_state['result']
+    original_count = st.session_state['original_count']
+    
+    # 提取分镜后的纯文本（去掉序号和换行，只留内容）用于字数比对
+    # 假设AI返回的是 "1. xxx\n2. xxx"，我们需要把数字和点去掉再统计
+    # 正则去除行首的数字和点
+    clean_result_content = re.sub(r'^\d+\.', '', result, flags=re.MULTILINE)
+    output_clean_count = len(clean_text_for_count(clean_result_content))
+    
+    # 计算偏差
+    deviation = output_clean_count - original_count
+    
+    # 计算分镜组数 (通过换行符粗略估计)
+    groups = len(result.strip().split('\n'))
 
-【文本】
-{chunk}
+    st.markdown("---")
+    st.markdown('<div class="sub-header">📊 视觉逻辑稽核面板</div>', unsafe_allow_html=True)
+    
+    # 统计数据列
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.markdown(f"""
+        <div class="stat-box">
+            <div class="stat-label">原文纯字数</div>
+            <div class="stat-value">{original_count}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    with col2:
+        st.markdown(f"""
+        <div class="stat-box">
+            <div class="stat-label">生成分镜总数</div>
+            <div class="stat-value">{groups} 组</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    with col3:
+        st.markdown(f"""
+        <div class="stat-box">
+            <div class="stat-label">处理后纯字数</div>
+            <div class="stat-value">{output_clean_count}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    with col4:
+        color = "green" if deviation == 0 else "red"
+        symbol = "+" if deviation > 0 else ""
+        st.markdown(f"""
+        <div class="stat-box">
+            <div class="stat-label">偏差值 (标点除外)</div>
+            <div class="stat-value" style="color: {color};">{symbol}{deviation} 字</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-请输出纯文本，每行一句，不要带序号。
-"""
-            try:
-                response = client.chat.completions.create(
-                    model=model_id,
-                    messages=[
-                        {"role": "system", "content": "你是一个严谨的分镜师。保持句意完整是第一优先级。"},
-                        {"role": "user", "content": system_prompt}
-                    ],
-                    temperature=0.1,
-                )
-                chunk_res = response.choices[0].message.content
-                # 收集所有行，去除空行
-                lines = [line.strip() for line in chunk_res.split('\n') if line.strip()]
-                # 去除可能存在的序号
-                lines = [re.sub(r'^\d+[\.、]\s*', '', line) for line in lines]
-                raw_ai_lines.extend(lines)
-                progress_bar.progress((i + 1) / len(chunks))
-                
-            except Exception as e:
-                st.error(f"处理出错: {e}"); break
-        
-        status.text("🤖 AI 处理完毕，正在进行“视觉胶水”缝合运算...")
-        
-        # 3. Python 强力缝合 (核心修正步骤)
-        # 调用我们写的算法，把碎片粘起来
-        final_lines = post_process_merge(raw_ai_lines, max_chars=38, min_chars=min_merge_len)
-        
-        # 4. 构建输出
-        final_text = ""
-        valid_chars = 0
-        data_list = []
-        
-        for idx, line in enumerate(final_lines):
-            line_len = count_valid_chars(line)
-            valid_chars += line_len
-            rhythm, _ = analyze_rhythm(line)
-            
-            final_text += f"{idx+1}.{line}\n"
-            data_list.append({
-                "序号": idx+1,
-                "分镜内容": line,
-                "字数": line_len,
-                "状态": rhythm
-            })
+    # 稽核结果提示
+    if deviation == 0:
+        st.success("✅ 100% 镜像还原成功：AI未遗漏任何原文内容。")
+    elif deviation < 0:
+        st.warning(f"⚠️ 警告：AI可能遗漏了 {abs(deviation)} 个字，请检查末尾或过长段落。")
+    else:
+        st.warning(f"⚠️ 警告：AI可能添加了 {deviation} 个字（或是重复了部分内容）。")
 
-        # 5. 展示
-        st.divider()
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("📝 最终分镜")
-            st.text_area("结果", value=final_text, height=600)
-            
-        with col2:
-            st.subheader("📊 效果稽核")
-            diff = valid_chars - input_count
-            st.metric("字数偏差", f"{diff} 字", delta_color="off" if diff==0 else "inverse")
-            if abs(diff) > 20:
-                st.warning("字数偏差较大，请检查")
-            else:
-                st.success("字数匹配完美")
-                
-            df = pd.DataFrame(data_list)
-            
-            def highlight(val):
-                if '❌' in val: return 'background-color: #ffcccc'
-                if '🟡' in val: return 'background-color: #fff8dc' # 只有极短时才黄
-                return ''
+    # 分镜结果编辑器
+    st.markdown('<div class="sub-header">🎬 视觉分镜编辑器 (无损还原)</div>', unsafe_allow_html=True)
+    st.text_area("生成结果 (可直接复制):", value=result, height=600)
 
-            st.dataframe(
-                df.style.map(highlight, subset=['状态']),
-                use_container_width=True,
-                height=500,
-                column_config={
-                    "序号": st.column_config.NumberColumn(width="small"),
-                    "分镜内容": st.column_config.TextColumn(width="large"),
-                    "字数": st.column_config.ProgressColumn(format="%d", max_value=40)
-                }
-            )
+    # 下载按钮
+    st.download_button(
+        label="📥 下载分镜脚本 (.txt)",
+        data=result,
+        file_name="storyboard_output.txt",
+        mime="text/plain"
+    )
