@@ -1,109 +1,128 @@
 import streamlit as st
 import requests
-import json
 import re
+import pandas as pd
 
-# 设置页面配置
-st.set_page_config(page_title="全能文案·电影感分镜系统", layout="wide")
+st.set_page_config(page_title="电影解说无损分镜系统 V2.0", layout="wide")
 
-# --- 侧边栏配置 ---
+# 自定义 CSS 压缩 UI 间距
+st.markdown("""
+    <style>
+    .block-container {padding-top: 1rem; padding-bottom: 0rem;}
+    .stDataFrame {border: 1px solid #e6e9ef;}
+    </style>
+    """, unsafe_allow_html=True)
+
 with st.sidebar:
-    st.title("⚙️ 导演引擎配置")
+    st.title("⚙️ 严谨模式引擎")
     api_key = st.text_input("API Key", type="password")
     base_url = st.text_input("接口地址", value="https://blog.tuiwen.xyz/v1")
     model_id = st.text_input("Model ID", value="gpt-4o")
     
-    st.info("""
-    **V1.1 视觉切换准则：**
-    1. 人称切换必须断开。
-    2. 动作完成必须切换。
-    3. 场景转换强制换行。
-    4. 严控35字/分镜。
-    """)
+    st.divider()
+    max_chars = st.slider("单镜头字数上限", 15, 50, 35)
+    st.warning("较真助理提示：35字约等于5秒语音。")
 
-# --- 主界面 ---
-st.title("🎬 全能文案·电影感分镜系统 (V1.1)")
+st.title("🎬 电影解说专业分镜工作台")
 
-uploaded_file = st.file_uploader("选择 TXT 文案", type=['txt'])
+uploaded_file = st.file_uploader("上传文案 (.txt)", type=['txt'])
 
-if uploaded_file is not None:
-    # 读取原文并预处理：去除多余空行，合并为纯连续文本
-    raw_content = uploaded_file.read().decode("utf-8")
-    clean_content = "".join(raw_content.split()) # 彻底抹除原段落结构，防止AI偷懒
+if uploaded_file:
+    # 预处理：彻底清洗干扰字符
+    raw_text = uploaded_file.read().decode("utf-8")
+    clean_text = "".join(raw_text.split())
     
-    col1, col2, col3 = st.columns(3)
-    col1.metric("原文总字数", len(clean_content))
-    
-    if st.button("🚀 启动视觉无损分镜"):
+    c1, c2, c3 = st.columns(3)
+    c1.metric("原文总字数", len(clean_text))
+
+    if st.button("🛠️ 执行逻辑分镜拆解"):
         if not api_key:
-            st.error("请输入 API Key")
+            st.error("请配置侧边栏 API Key")
         else:
-            # 构建严谨的 Prompt
+            # 升级后的暴力指令集
             prompt = f"""
-            你是一个极其严谨的电影解说分镜师。
-            任务：将以下文案转换为分镜脚本。
+            你是一个电影剪辑大师。你的任务是将长文本拆分为分镜文案。
             
-            【硬性指令】
-            1. 逐字逐句理解，不可遗漏、添加、或更改任何一个字。
-            2. 抹除原有段落，重新按照视觉逻辑切分。
-            3. 每行一个分镜，编号格式为“数字.”。
-            4. 触发切分条件：
-               - 角色对话切换。
-               - 场景地点改变。
-               - 核心动作完成（如：进门、坐下、回头）。
-            5. 节奏限制：每个分镜文案绝对禁止超过35个汉字（为了对齐5秒音频）。
+            【核心原则】
+            1. 严禁修改、添加、删除原文任何字符！
+            2. 严禁输出任何多余的文字（如“分镜1”、“场景”等）。
+            3. 必须保持原文顺序。
+            
+            【分镜逻辑】
+            - 目标：将长句拆分为适合5秒展示的视觉单元。
+            - 长度：每个单元必须在 15 到 {max_chars} 个字符之间。
+            - 切分点：优先在标点处切分，其次在主谓宾结构完成处切分。
+            
+            【输出格式】
+            单元1###单元2###单元3...
+            (注意：仅使用 ### 作为分隔符，不要换行，不要序号)
 
-            【输入原文】
-            {clean_content}
-
-            【输出格式示例】
-            1.文案内容
-            2.文案内容
+            【输入文本】
+            {clean_text}
             """
 
             try:
-                with st.spinner("正在进行视觉单元规划..."):
-                    headers = {
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json"
-                    }
+                with st.spinner("正在进行深度逻辑重组..."):
+                    headers = {"Authorization": f"Bearer {api_key}"}
                     data = {
                         "model": model_id,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.3 # 降低随机性，保证严谨
+                        "messages": [{"role": "system", "content": "你是一个只输出原文分隔结果的机器人。"},
+                                     {"role": "user", "content": prompt}],
+                        "temperature": 0.0 # 强制要求确定性，消除幻觉
                     }
                     
                     response = requests.post(f"{base_url}/chat/completions", headers=headers, json=data)
-                    result = response.json()
-                    output_text = result['choices'][0]['message']['content']
+                    raw_output = response.json()['choices'][0]['message']['content'].strip()
                     
-                    # --- 后处理与统计 ---
-                    lines = [l for l in output_text.split('\n') if l.strip()]
-                    processed_content = "".join([re.sub(r'^\d+\.', '', l).strip() for l in lines])
-                    offset = len(clean_content) - len(processed_content)
+                    # 逻辑处理：解析分割后的结果
+                    shots = raw_output.split("###")
                     
-                    # --- 结果展示 ---
-                    col2.metric("生成分镜总数", f"{len(lines)} 组")
-                    col3.metric("偏移值 (差值)", f"{offset} 字", delta_color="inverse" if offset != 0 else "normal")
-                    
-                    if offset != 0:
-                        st.warning(f"⚠️ 警告：检测到字符偏移！原文{len(clean_content)}字，生成后剩余{len(processed_content)}字。请检查是否有遗漏。")
+                    # 构建高密度数据表
+                    df_data = []
+                    current_count = 0
+                    for i, shot in enumerate(shots):
+                        shot_content = shot.strip()
+                        if not shot_content: continue
+                        df_data.append({
+                            "序号": i + 1,
+                            "分镜文案内容": shot_content,
+                            "字数": len(shot_content),
+                            "预计时长": f"{len(shot_content)/7:.1f}s" # 假设语速为7字/秒
+                        })
+                        current_count += len(shot_content)
 
-                    st.subheader("📝 视觉分镜编辑器 (无损还原)")
+                    # 渲染数据看板
+                    processed_text = "".join([d['分镜文案内容'] for d in df_data])
+                    offset = len(clean_text) - len(processed_text)
                     
-                    # 实时节奏分析与长度监控
-                    for idx, line in enumerate(lines):
-                        content_only = re.sub(r'^\d+\.', '', line).strip()
-                        char_count = len(content_only)
-                        
-                        col_l, col_r = st.columns([0.8, 0.2])
-                        with col_l:
-                            st.text_area(f"分镜 {idx+1}", value=line, height=70, key=f"shot_{idx}")
-                        with col_r:
-                            if char_count > 35:
-                                st.error(f"字数: {char_count} (超标)")
-                            else:
-                                st.success(f"字数: {char_count}")
+                    c2.metric("最终分镜总数", len(df_data))
+                    c3.metric("字符偏移(校验)", offset, delta="-异常" if offset != 0 else "完美", delta_color="inverse")
+
+                    if offset != 0:
+                        st.error(f"严重警告：字符不匹配！缺失字符：{offset}")
+                        with st.expander("查看差异对比"):
+                            st.write("原文前50字：", clean_text[:50])
+                            st.write("生成前50字：", processed_text[:50])
+
+                    # 高效 UI 展示：使用 Data Editor
+                    st.subheader("📝 视觉分镜精修表")
+                    edited_df = st.data_editor(
+                        df_data,
+                        column_config={
+                            "序号": st.column_config.NumberColumn(width="small"),
+                            "分镜文案内容": st.column_config.TextColumn(width="large"),
+                            "字数": st.column_config.BarChartColumn(y_min=0, y_max=max_chars),
+                        },
+                        use_container_width=True,
+                        num_rows="dynamic"
+                    )
+                    
+                    # 导出按钮
+                    st.download_button(
+                        "💾 导出分镜表 (CSV)",
+                        pd.DataFrame(edited_df).to_csv(index=False),
+                        "storyboard.csv"
+                    )
 
             except Exception as e:
-                st.error(f"处理出错：{str(e)}")
+                st.error(f"处理失败：{str(e)}")
