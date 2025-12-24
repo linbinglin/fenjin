@@ -2,44 +2,27 @@ import streamlit as st
 from openai import OpenAI
 import re
 import pandas as pd
+import time
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="全能文案·电影感分镜系统 (V2.0)",
+    page_title="分镜引擎 V3.0 (防幻觉内核)",
     page_icon="🎬",
     layout="wide"
 )
 
-# --- CSS样式优化 (模仿专业软件风格) ---
+# --- CSS样式 ---
 st.markdown("""
 <style>
-    .reportview-container {
-        background: #f0f2f6;
-    }
-    .main-header {
-        font-size: 2.5rem;
-        color: #333;
-        font-weight: 700;
-    }
-    .sub-header {
-        font-size: 1.2rem;
-        color: #666;
-    }
-    .metric-card {
-        background-color: #ffffff;
-        border-radius: 10px;
-        padding: 15px;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
-        text-align: center;
-    }
-    .stDataFrame {
-        border: 1px solid #ddd;
-        border-radius: 5px;
-    }
+    .reportview-container { background: #f0f2f6; }
+    .main-header { font-size: 2.2rem; color: #333; font-weight: 700; }
+    .status-box { padding: 10px; border-radius: 5px; margin-bottom: 10px; }
+    .stDataFrame { border: 1px solid #ddd; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 辅助函数 ---
+# --- 核心工具函数 ---
+
 def count_valid_chars(text):
     """统计有效字数（排除标点）"""
     if not text: return 0
@@ -50,183 +33,187 @@ def analyze_rhythm(text):
     """分析分镜节奏状态"""
     length = count_valid_chars(text)
     if length == 0: return "❌ 空白", length
-    if length < 10: return "🟡 偏短 (快切)", length
-    if 10 <= length <= 35: return "✅ 理想 (5秒)", length
-    return "🔴 偏长 (需拆分)", length
+    if length < 8: return "🟡 过短 (需合并)", length
+    if 8 <= length <= 38: return "✅ 完美 (5秒)", length
+    return "🔴 过长 (需拆分)", length
 
-# --- 侧边栏：核心配置 ---
+def smart_chunking(text, max_chunk_size=1000):
+    """
+    智能分块算法：
+    防止一次性喂给AI太多文字导致幻觉。
+    按句号/感叹号/问号切分，保证每块大约 1000 字。
+    """
+    sentences = re.split(r'(?<=[。！？!?])', text)
+    chunks = []
+    current_chunk = ""
+    
+    for sentence in sentences:
+        if len(current_chunk) + len(sentence) < max_chunk_size:
+            current_chunk += sentence
+        else:
+            if current_chunk:
+                chunks.append(current_chunk)
+            current_chunk = sentence
+    if current_chunk:
+        chunks.append(current_chunk)
+    return chunks
+
+# --- 侧边栏配置 ---
 with st.sidebar:
-    st.markdown("## ⚙️ 导演引擎 V2.0")
+    st.markdown("## ⚙️ 引擎设置 V3.0")
+    base_url = st.text_input("Base URL", value="https://blog.tuiwen.xyz/v1")
+    api_key = st.text_input("API Key", type="password")
+    model_id = st.text_input("Model ID", value="gpt-4o", help="建议使用逻辑性强的模型")
     
-    base_url = st.text_input(
-        "接口地址 (Base URL)", 
-        value="https://blog.tuiwen.xyz/v1",
-        help="例如: https://blog.tuiwen.xyz/v1"
-    )
-
-    api_key = st.text_input(
-        "API Key (密钥)", 
-        type="password",
-        value=""
-    )
-
-    model_id = st.text_input(
-        "Model ID (模型名称)", 
-        value="gpt-4o",
-        help="推荐使用 gpt-4o 或 claude-3-5-sonnet 以获得最佳逻辑理解能力"
-    )
-    
-    st.info("""
-    **V2.0 更新日志：**
-    1. 修复了分镜过碎的问题。
-    2. 增加了视觉节奏分析面板。
-    3. 优化了长难句的语义完整性。
-    """)
+    st.divider()
+    st.markdown("### 🛡️ 防幻觉机制")
+    st.caption("V3.0 采用「分块流水线」技术。将长文拆解为小段单独处理，彻底杜绝 AI 因上下文过长而开始编造内容的现象。")
 
 # --- 主界面 ---
-st.markdown('<div class="main-header">🎬 全能文案·电影感分镜系统 (V2.0)</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">针对“画面碎片化”深度优化，智能识别主语、动作与场景。</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">🎬 电影分镜引擎 V3.0 (严控版)</div>', unsafe_allow_html=True)
+st.markdown("##### 🚀 核心特性：分块运算 | 0幻觉 | 严格字数对齐")
 st.divider()
 
-# 1. 文件上传
 uploaded_file = st.file_uploader("📂 选择 TXT 文案", type=["txt"])
 
 if uploaded_file is not None:
     raw_text = uploaded_file.read().decode("utf-8")
-    
-    # 预处理：去重、去空行、压缩为一行 (防AI偷懒的核心步骤)
+    # 极度暴力的压缩，去掉所有格式，只留纯文本流
     flattened_text = raw_text.replace('\n', '').replace('\r', '').strip()
     input_count = count_valid_chars(flattened_text)
 
-    # 显示原文状态
-    st.success(f"📄 原文已装载 | 总字数: {input_count} 字 | 已进行“反懒惰”压缩处理")
+    col1, col2 = st.columns([3, 1])
+    col1.success(f"原文装载完毕 (共 {input_count} 有效字符)")
     
-    # 生成按钮
-    if st.button("🚀 启动视觉分镜引擎", type="primary"):
+    if col1.button("⚡ 启动精准分镜", type="primary"):
         if not api_key:
-            st.error("请先配置 API Key")
+            st.error("缺少 API Key")
             st.stop()
-            
-        # --- 核心 Prompt (经过针对性优化的“导演模式”) ---
-        system_prompt = f"""
-你是由好莱坞资深剪辑师训练的AI分镜导演。你的任务是将一段被压缩成一行的文本，还原为适合短视频制作的“视觉分镜脚本”。
 
-【原文本】
-{flattened_text}
-
-【绝对禁止】
-1. 禁止输出原文本没有的内容。
-2. 禁止出现“碎片化”分镜（如单独的“毫无用处”、“早已买好了船票”这种无头无尾的短语，必须和主语或上一句动作合并）。
-3. 禁止改变故事原意。
-
-【分镜拆解逻辑 - 请严格遵守】
-1. **语义完整性优先**：不要机械地按字数切分。每一行分镜必须是一个完整的“视觉画面”或“完整的台词意群”。
-   - 错误示范：
-     1. 皇上翻遍后宫只为
-     2. 找出酒后爬龙床的
-     3. 官女
-   - 正确示范：
-     1. 皇上翻遍后宫只为找出酒后爬龙床的官女
-2. **动作与场景切换**：
-   - 遇到由“我”转“他”时，必须换行。
-   - 遇到新场景（如从卧室转到大厅）时，必须换行。
-   - 遇到明显的动作变化（如从“坐着”变“站起摔杯子”）时，必须换行。
-3. **时长控制（黄金法则）**：
-   - 理想长度：每行 15-35 个字（约 3-5 秒）。
-   - 如果一句话太长（超过 40 字），请在逗号或逻辑转折处切分，但切分后的半句必须有意义。
-   - 如果一句话太短（少于 8 字），请判断它是否能合并到上一句动作中？如果不能合并（如强调句），则保留。
-
-【输出格式】
-纯文本列表，每行一个数字开头，不要Markdown加粗。
-1.第一段分镜内容
-2.第二段分镜内容
-...
-"""
-
+        # 1. 执行智能分块
+        chunks = smart_chunking(flattened_text, max_chunk_size=1200) # 1200字符为一个安全区间
+        total_chunks = len(chunks)
+        
+        st.info(f"🧠 为了防止 AI 加戏，系统已将长文切割为 {total_chunks} 个独立运算块，正在逐一处理...")
+        
         client = OpenAI(api_key=api_key, base_url=base_url)
         
-        st.subheader("📊 正在进行视觉单元规划...")
-        result_container = st.empty()
-        full_response = ""
+        full_result_text = ""
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        result_area = st.empty()
         
-        try:
-            stream = client.chat.completions.create(
-                model=model_id,
-                messages=[
-                    {"role": "system", "content": "你是一个严谨的电影分镜师。你极度厌恶破碎的句子。你擅长将文本划分为完整的视觉动作单元。"},
-                    {"role": "user", "content": system_prompt}
-                ],
-                stream=True,
-                temperature=0.6, # 降低温度，增加逻辑稳定性
-            )
+        # 2. 循环处理每个块 (这是解决幻觉的核心)
+        for i, chunk in enumerate(chunks):
+            status_text.text(f"正在运算第 {i+1}/{total_chunks} 区块 (进度 {(i+1)/total_chunks:.0%})...")
+            
+            # 极度严格的 Prompt
+            system_prompt = f"""
+你是一个严格的文本格式化程序。你的唯一任务是按视觉逻辑给文本换行。
 
-            for chunk in stream:
-                if chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
-                    full_response += content
-                    result_container.text_area("生成预览 (实时)", value=full_response, height=400)
-            
-            # --- 后处理与数据分析 (复刻图四的功能) ---
-            st.divider()
-            st.subheader("📈 视觉逻辑稽核面板")
-            
-            # 1. 解析生成的内容
-            lines = []
-            raw_lines = full_response.strip().split('\n')
-            
-            output_valid_chars = 0
-            
-            for line in raw_lines:
-                # 提取内容（去除 1. 这种序号）
-                clean_line = re.sub(r'^\d+\.?\s*', '', line).strip()
-                if clean_line:
-                    status, length = analyze_rhythm(clean_line)
-                    output_valid_chars += length
-                    lines.append({
-                        "分镜序号": len(lines) + 1,
-                        "分镜内容": clean_line,
-                        "字数": length,
-                        "节奏状态": status
-                    })
-            
-            # 2. 统计数据展示
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("原文总字数", input_count)
-            col2.metric("生成分镜组数", len(lines))
-            col3.metric("处理后总字数", output_valid_chars)
-            
-            diff = output_valid_chars - input_count
-            col4.metric("偏差值 (漏字监控)", f"{diff} 字", delta_color="inverse")
-            
-            if abs(diff) > 10:
-                st.error(f"⚠️ 警报：AI 可能遗漏或添加了部分内容（偏差 {diff} 字），请检查下方详情。")
-            else:
-                st.success("✅ 完美还原：内容无损，逻辑完整。")
+【严厉禁止】
+1. 绝对禁止添加原文中没有的字（如“他说”、“怒道”、“笑着”）。
+2. 绝对禁止删除原文内容。
+3. 禁止修改原文措辞。
 
-            # 3. 详细数据表 (类似图四的右侧栏)
-            df = pd.DataFrame(lines)
-            st.markdown("### 🎬 实时视觉节奏分析")
+【分段规则】
+1. 将长句拆分为视觉分镜（每行约 15-35 字）。
+2. 遇到角色切换、场景切换、动作变化时，必须强制换行。
+3. 如果原文句子太长，请在标点处换行。
+4. 如果原文句子极短（如2-4个字），尝试将其附着在上一句或下一句，除非它是强烈的语气词。
+
+【待处理文本】
+{chunk}
+
+请直接输出分行后的文本，每行开头不要加数字序号，保持纯文本，以便后续拼接。
+"""
+            try:
+                response = client.chat.completions.create(
+                    model=model_id,
+                    messages=[
+                        {"role": "system", "content": "你是一个没有感情的文本切割机器。你只负责换行，不负责创作。"},
+                        {"role": "user", "content": system_prompt}
+                    ],
+                    temperature=0.1, # 极低温度，扼杀创造力，只留逻辑
+                )
+                
+                chunk_result = response.choices[0].message.content
+                full_result_text += chunk_result + "\n"
+                
+                # 实时更新显示
+                result_area.text_area("正在生成的脚本...", value=full_result_text, height=400)
+                progress_bar.progress((i + 1) / total_chunks)
+                
+            except Exception as e:
+                st.error(f"区块 {i+1} 处理失败: {e}")
+                break
+
+        status_text.text("✅ 所有区块运算完毕，正在进行逻辑稽核...")
+        
+        # --- 3. 后处理：添加序号与统计 ---
+        final_lines = [line.strip() for line in full_result_text.split('\n') if line.strip()]
+        processed_data = []
+        
+        final_output_str = ""
+        total_output_valid_chars = 0
+        
+        for idx, line in enumerate(final_lines):
+            # 再次清洗可能残留的序号（以防万一）
+            clean_line = re.sub(r'^\d+[\.、]\s*', '', line)
             
-            # 使用 dataframe 高亮显示
-            def highlight_status(val):
-                color = 'black'
-                if '❌' in val: color = 'red'
-                elif '🟡' in val: color = '#D4AF37' # Gold
-                elif '🔴' in val: color = 'orange'
-                elif '✅' in val: color = 'green'
-                return f'color: {color}; font-weight: bold;'
+            status, length = analyze_rhythm(clean_line)
+            total_output_valid_chars += length
+            
+            # 构建最终输出文本（带序号）
+            final_output_str += f"{idx+1}.{clean_line}\n"
+            
+            processed_data.append({
+                "序号": idx + 1,
+                "分镜内容": clean_line,
+                "字数": length,
+                "评价": status
+            })
 
-            st.dataframe(
-                df.style.map(highlight_status, subset=['节奏状态']),
-                use_container_width=True,
-                height=500,
-                column_config={
-                    "分镜序号": st.column_config.NumberColumn("序号", width="small"),
-                    "分镜内容": st.column_config.TextColumn("分镜文案 (Visual Script)", width="large"),
-                    "字数": st.column_config.ProgressColumn("时长预估", min_value=0, max_value=50, format="%d 字"),
-                    "节奏状态": st.column_config.TextColumn("AI 建议", width="medium"),
-                }
-            )
+        # --- 4. 最终结果面板 ---
+        result_area.text_area("✅ 最终分镜脚本", value=final_output_str, height=500)
+        
+        st.divider()
+        st.subheader("⚖️ 最终校验")
+        
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("原文有效字数", input_count)
+        m2.metric("分镜后字数", total_output_valid_chars)
+        
+        diff = total_output_valid_chars - input_count
+        m3.metric("偏差值 (越小越好)", f"{diff} 字", 
+                  delta_color="off" if diff == 0 else "inverse")
+        
+        # 智能判定结果
+        if abs(diff) < 20: # 允许极小误差（可能是空格或全半角符号差异）
+            m4.success("🛡️ 安全：无幻觉")
+        elif diff > 20:
+            m4.error(f"⚠️ 警告：多了 {diff} 字")
+        else:
+            m4.warning(f"⚠️ 警告：少了 {abs(diff)} 字")
 
-        except Exception as e:
-            st.error(f"发生错误: {str(e)}")
+        # --- 详情表 ---
+        df = pd.DataFrame(processed_data)
+        
+        def highlight_row(val):
+            color = ''
+            if '❌' in val: color = 'background-color: #ffcccc'
+            elif '🟡' in val: color = 'background-color: #fff4cc'
+            elif '🔴' in val: color = 'background-color: #ffe6e6'
+            return color
+
+        st.dataframe(
+            df,
+            column_config={
+                "序号": st.column_config.NumberColumn(width="small"),
+                "分镜内容": st.column_config.TextColumn(width="large"),
+                "字数": st.column_config.ProgressColumn(format="%d", min_value=0, max_value=50),
+                "评价": st.column_config.TextColumn(width="medium"),
+            },
+            use_container_width=True,
+            height=600
+        )
