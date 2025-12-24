@@ -1,71 +1,113 @@
 import streamlit as st
 import requests
 import time
+import re
 
 # --- 页面配置 ---
-st.set_page_config(page_title="精密分镜助理 Pro Max", layout="wide")
-st.title("🎬 电影解说精密分镜系统")
+st.set_page_config(page_title="精密分镜助理 Pro Ultra", layout="wide")
+st.title("🎬 电影解说精密分镜系统 - 逻辑闭环版")
 
 # --- 侧边栏配置 ---
 with st.sidebar:
     st.header("⚙️ 导演级配置")
     api_url = st.text_input("API 地址", value="https://blog.tuiwen.xyz/v1/chat/completions")
     api_key = st.text_input("API Key", type="password")
-    selected_model = st.text_input("Model ID", value="grok-4.1") # 默认您习惯的模型
+    selected_model = st.text_input("Model ID", value="grok-4.1")
     
     st.divider()
-    chunk_size = st.slider("每批处理字符数", 500, 3000, 1500)
-    st.warning("较真准则：每个分镜必须控制在 20-35 字之间，以匹配 5 秒黄金剪辑律。")
+    chunk_size = st.slider("逻辑块大小", 300, 1500, 800, help="减小块大小可以提高逻辑严密性")
+    st.warning("较真准则：系统已开启格式强制对齐，序号将全局连续。")
 
-# --- 深度优化的 AI 指令 ---
-SYSTEM_PROMPT = """你是一个顶级的电影解说导演和首席剪辑师。你的任务是将文学稿件转化为高水准的【分镜脚本】。
+# --- 深度进化的导演指令 ---
+SYSTEM_PROMPT = """你是一个极其严谨的电影分镜导演。
+你的任务是将提供的文本流切分为符合【5秒视听节奏】的分镜。
 
-请严格遵守以下【较真协议】：
+### 核心操作规约：
+1. **全局序号连续性**：你必须从我给出的【起始序号】开始编号，严禁从1重新开始。
+2. **5秒黄金律**：
+   - 每个分镜文字必须在 20-35 个字符之间。
+   - 【强制合并】：如果原文的一句话很短（如“他笑了”），必须强制并入下一个动作或对白中。
+   - 【强制拆分】：如果一句话太长（超过35字），必须在逻辑停顿处切开。
+3. **零损耗原则**：禁止修改、增加或删除原文中的任何一个字！
+4. **分镜逻辑**：
+   - 必须在：场景切换、角色切换、重大动作改变、或者字数满35字时，切换到下一个分镜。
+5. **纯净输出**：只输出分镜列表，格式严格遵循：序号.内容（例如：12.这是示例分镜文字内容）
 
-1. **视听对齐原则（核心）**：
-   - 每一个分镜的文字，对应的语音时长必须接近 5 秒。
-   - 【硬性约束】：每段文字必须在 20 到 35 个字符之间。
-   - 【操作逻辑】：如果一句话太短（如“他笑了”），必须与其后的描写合并。如果一句话太长（超过35字），必须在逻辑停顿处切分。
-
-2. **分镜切分逻辑**：
-   - 只有满足以下任一条件，才允许开启新的一行（新分镜）：
-     a) 当前累计文字已达到 25-35 字。
-     b) 故事发生了物理空间的场景切换。
-     c) 角色发生了明显的身份/时空转换（如“第一世”到“第二世”）。
-     d) 出现了全新的角色对白。
-
-3. **零损耗规范**：
-   - 严禁删除、修改、润色原文中的任何一个字符。
-   - 严禁添加任何描述语、开场白或括号说明。
-
-4. **禁止偷懒**：
-   - 不要直接沿用原文的段落。请将原文视为一个没有空格和换行的长字符串，由你重新根据“25-35字/5秒”的节奏感进行物理切分。
-
-输出格式示例：
-1.第一段分镜文字（20-35字）
-2.第二段分镜文字（20-35字）
-...
+### 严禁事项：
+- 严禁出现少于15个字的分镜。
+- 严禁在分镜中加入（画面描述）等非原文内容。
+- 严禁改变故事原有的叙述顺序。
 """
 
-def process_chunk(text, idx):
+def clean_and_format_results(raw_text, start_num):
+    """
+    后端强制格式化函数：
+    即便AI输出格式有偏差，该函数也会强行将其修正为“序号.内容”
+    并确保序号从正确的位置开始。
+    """
+    lines = raw_text.strip().split('\n')
+    formatted_lines = []
+    current_idx = start_num
+    
+    for line in lines:
+        # 提取序号之后的所有文字内容，过滤掉AI可能生成的乱码或多余序号
+        content = re.sub(r'^\d+[\.．\s、]+', '', line).strip()
+        if content:
+            formatted_lines.append(f"{current_idx}.{content}")
+            current_idx += 1
+            
+    return formatted_lines, current_idx
+
+def process_logic_flow(full_text):
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    # 在发送给AI前，彻底抹除原文的排版痕迹，迫使AI重构
-    flat_text = text.replace("\n", "").replace("\r", "").replace(" ", "").strip()
     
-    payload = {
-        "model": selected_model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"请对以下文本流进行导演级分镜处理（当前处理第{idx}部分）：\n\n{flat_text}"}
-        ],
-        "temperature": 0.1 # 极端严谨模式
-    }
+    # 清理原文换行和空格，变成纯净文本流
+    clean_text = full_text.replace("\n", "").replace("\r", "").replace(" ", "").strip()
     
-    try:
-        response = requests.post(api_url, headers=headers, json=payload, timeout=120)
-        return response.json()['choices'][0]['message']['content']
-    except Exception as e:
-        return f"⚠️ 错误：{str(e)}"
+    total_shots = []
+    current_global_num = 1
+    last_context = "" # 存放上一个块的结尾，给AI参考
+    
+    # 按块处理
+    for i in range(0, len(clean_text), chunk_size):
+        chunk = clean_text[i : i + chunk_size]
+        
+        # 构造带有上下文的 User Prompt
+        user_content = f"【起始序号】：{current_global_num}\n"
+        if last_context:
+            user_content += f"【上段结尾参考】：...{last_context}\n"
+        user_content += f"【本次需处理原文】：\n{chunk}"
+        
+        payload = {
+            "model": selected_model,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_content}
+            ],
+            "temperature": 0.1
+        }
+        
+        try:
+            with st.spinner(f"正在处理第 {current_global_num} 个分镜起的片段..."):
+                response = requests.post(api_url, headers=headers, json=payload, timeout=120)
+                res_data = response.json()
+                raw_output = res_data['choices'][0]['message']['content']
+                
+                # 后端强制纠偏处理
+                formatted_chunk, next_num = clean_and_format_results(raw_output, current_global_num)
+                
+                total_shots.extend(formatted_chunk)
+                current_global_num = next_num
+                last_context = chunk[-30:] # 更新上下文参考
+                
+                # 实时展示
+                st.text_area(f"当前处理进度 (序号: {current_global_num-1})", "\n".join(formatted_chunk), height=200)
+                
+        except Exception as e:
+            st.error(f"处理块时发生错误: {str(e)}")
+            break
+            
+    return total_shots
 
 # --- 主界面 ---
 uploaded_file = st.file_uploader("选择本地 .txt 文案文件", type=['txt'])
@@ -73,26 +115,27 @@ uploaded_file = st.file_uploader("选择本地 .txt 文案文件", type=['txt'])
 if uploaded_file:
     content = uploaded_file.read().decode("utf-8")
     
-    if st.button("🚀 开始自动化精密分镜"):
+    if st.button("🚀 启动全局逻辑闭环分镜"):
         if not api_key:
             st.error("请填入 API Key")
         else:
-            # 自动分段处理逻辑
-            chunks = [content[i:i+chunk_size] for i in range(0, len(content), chunk_size)]
-            all_output = ""
+            final_storyboard = process_logic_flow(content)
             
-            p_bar = st.progress(0)
-            for i, chunk in enumerate(chunks):
-                with st.spinner(f"正在以导演思维解析第 {i+1} 段..."):
-                    res = process_chunk(chunk, i+1)
-                    all_output += res + "\n"
-                    p_bar.progress((i + 1) / len(chunks))
+            st.divider()
+            st.subheader("✅ 最终连续分镜脚本")
+            final_text = "\n".join(final_storyboard)
+            st.text_area("全量脚本预览：", final_text, height=600)
             
-            st.subheader("🎬 优化后的分镜结果")
-            st.text_area("生成的脚本：", all_output, height=500)
+            # 较真校验
+            bad_count = 0
+            for shot in final_storyboard:
+                text_part = shot.split('.', 1)[-1]
+                if len(text_part) < 20 or len(text_part) > 35:
+                    bad_count += 1
             
-            # 较真校验：统计每行字数并给出警告
-            lines = [line for line in all_output.split('\n') if line.strip()]
-            bad_lines = [l for l in lines if len(l.split('.', 1)[-1]) > 35 or len(l.split('.', 1)[-1]) < 15]
-            if bad_lines:
-                st.warning(f"较真提示：检测到 {len(bad_lines)} 处分镜可能存在时长不合规，请人工微调。")
+            if bad_count > 0:
+                st.warning(f"⚠️ 较真提醒：全文共 {len(final_storyboard)} 个分镜，其中 {bad_count} 个字数不在 20-35 之间（已强制序号连续）。")
+            else:
+                st.success(f"💎 完美达成！共 {len(final_storyboard)} 个分镜，全部符合 5 秒黄金剪辑律且序号连续。")
+                
+            st.download_button("📥 导出最终分镜脚本", final_text, file_name="final_storyboard.txt")
