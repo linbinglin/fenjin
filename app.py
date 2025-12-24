@@ -1,159 +1,157 @@
 import streamlit as st
 from openai import OpenAI
 import re
+import pandas as pd
 
-# 设置页面配置
-st.set_page_config(
-    page_title="AI 电影解说分镜助手",
-    page_icon="🎬",
-    layout="wide"
-)
+# --- 工具函数：智能语义分块 (V11 增强版) ---
+def smart_chunk_text(text, max_chars=1000):
+    """寻找最稳固的标点符号（。！？\n）进行切分，确保每一块都是完整的段落"""
+    chunks = []
+    while len(text) > max_chars:
+        split_index = -1
+        # 优先找段落末尾，其次是长句末尾
+        for mark in ["\n", "。", "！", "？"]:
+            pos = text.rfind(mark, 0, max_chars)
+            split_index = max(split_index, pos)
+        
+        if split_index == -1:
+            split_index = max_chars
+        else:
+            split_index += 1 # 包含标点符号
+            
+        chunks.append(text[:split_index].strip())
+        text = text[split_index:]
+    chunks.append(text.strip())
+    return [c for c in chunks if c]
 
-# --- 辅助函数：计算字数（不含标点） ---
-def count_valid_chars(text):
-    """
-    统计文本中的有效字符数（汉字、字母、数字），排除标点符号和空格。
-    """
-    if not text:
-        return 0
-    # 使用正则替换掉所有标点符号和空白字符
-    # \w 匹配字母数字下划线，\u4e00-\u9fa5 匹配汉字
-    # 反向逻辑：将不是汉字、字母、数字的内容替换为空
-    clean_text = re.sub(r'[^\w\u4e00-\u9fa50-9]', '', text)
-    return len(clean_text)
+def get_pure_text(text):
+    """精确提取纯文本内容，用于 1:1 对账"""
+    text = re.sub(r'\d+[\.、]\s*', '', text)
+    return "".join(text.split())
 
-# --- 侧边栏：配置设置 ---
-st.sidebar.header("⚙️ 参数配置")
+# --- 页面配置 ---
+st.set_page_config(page_title="电影解说导演 V11-视觉单元版", layout="wide")
 
-# 1. API 配置
-base_url = st.sidebar.text_input(
-    "API Base URL (中转接口地址)", 
-    value="https://blog.tuiwen.xyz/v1",
-    help="请填写Base URL，通常以 /v1 结尾。注意：代码会自动追加 /chat/completions"
-)
+st.sidebar.title("⚙️ 导演引擎 V11")
+api_key = st.sidebar.text_input("1. API Key", type="password")
+base_url = st.sidebar.text_input("2. 接口地址", value="https://blog.tuiwen.xyz/v1")
+model_id = st.sidebar.text_input("3. Model ID", value="gpt-4o")
 
-api_key = st.sidebar.text_input(
-    "API Key (密钥)", 
-    type="password",
-    help="请输入您的 API Key"
-)
-
-# 2. 模型选择 (重点需求 2 & 3)
-model_id = st.sidebar.text_input(
-    "Model ID (模型名称)", 
-    value="gpt-4o",
-    placeholder="例如: gpt-4o, deepseek-chat, claude-3-5-sonnet",
-    help="请输入您想使用的模型名称，支持 DeepSeek, GPT-4o, Claude 等"
-)
+st.sidebar.divider()
+st.sidebar.info("""
+**🎞️ V11 视觉切分准则：**
+1. **主语即镜头**：人称切换（如“我”转“他”）必须断开。
+2. **动作即分镜**：一个核心动作完成后必须切镜。
+3. **对话独立性**：台词结束后的动作描写严禁混在一起。
+4. **硬性 35 字**：单行依然禁止超过 35 字。
+""")
 
 # --- 主界面 ---
-st.title("🎬 AI 电影解说分镜生成器")
-st.markdown("### 逐字逐句分析，精准卡点 5 秒分镜")
+st.title("🎞️ 全能文案·电影感分镜系统 (V11)")
+st.caption("针对“音画不同步”、“内容重叠”深度优化。适配全题材文案。")
 
-# 1. 文件上传 (代码要求 1)
-uploaded_file = st.file_uploader("📂 选择本地 TXT 文档", type=["txt"])
+uploaded_file = st.file_uploader("📂 选择 TXT 文案", type=['txt'])
 
 if uploaded_file is not None:
-    # 读取文件
-    raw_text = uploaded_file.read().decode("utf-8")
-    
-    # --- 预处理：删除原段落 (重点需求 7) ---
-    # 将文本压缩成一行，防止 AI 偷懒直接用原文段落
-    flattened_text = raw_text.replace('\n', '').replace('\r', '').strip()
-    
-    # 统计原文有效字数
-    input_count = count_valid_chars(flattened_text)
+    raw_text = uploaded_file.getvalue().decode("utf-8")
+    input_stream = "".join(raw_text.split())
+    input_len = len(input_stream)
 
-    # --- 显示原文信息面板 (新增功能) ---
-    st.info(f"📄 原文已加载 | 有效字数 (不含标点): **{input_count}** 字")
-    
-    with st.expander("点击查看处理前的“被压缩”原文 (用于防AI偷懒)"):
-        st.write(flattened_text)
+    st.subheader("📊 视觉逻辑稽核面板")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("原文总字数", f"{input_len} 字")
 
-    # 生成按钮
-    if st.button("🚀 开始生成分镜", type="primary"):
+    if st.button("🚀 启动视觉无损分镜"):
         if not api_key:
-            st.error("❌ 请在左侧侧边栏输入 API Key")
-            st.stop()
-        
-        if not flattened_text:
-            st.error("❌ 文本内容为空")
-            st.stop()
+            st.error("请配置侧边栏参数")
+        else:
+            try:
+                actual_base = base_url.split('/chat')[0].strip()
+                client = OpenAI(api_key=api_key, base_url=actual_base)
+                
+                # 步骤 1：智能分块
+                chunks = smart_chunk_text(input_stream)
+                st.write(f"📦 已识别 {len(chunks)} 个独立剧情块，正在进行视觉单元规划...")
+                
+                full_result = []
+                current_shot_idx = 1
+                
+                progress_bar = st.progress(0)
+                
+                for idx, chunk in enumerate(chunks):
+                    with st.spinner(f'正在规划第 {idx+1}/{len(chunks)} 块镜头...'):
+                        # --- V11 视觉导演 Prompt ---
+                        system_prompt = f"""你是一个顶级的解说视频导演。你的任务是把文本流拆解成“画面镜头”。
 
-        # --- 构建 Prompt (核心逻辑) ---
-        # 严格按照你的 1-8 点需求编写 Prompt
-        system_prompt = f"""
-你是一个优秀的电影解说分镜员。请根据用户提供的文本生成分镜脚本。
+【视觉分镜红线】：
+1. **主语变更即切分**：只要句子的主语（动作发出者）发生了改变，必须立即结束当前分镜，开启下一个编号。
+2. **台词与动作分离**：角色的一句台词结束后，紧接的其他角色的反应或环境描写，严禁放在同一个编号内。
+3. **镜像 0 损还原**：你只是负责加编号和换行。严禁擅自修改、润色、重复、或合并原文任何文字。偏差必须为 0。
+4. **长度与语意平衡**：
+   - 理想长度：25-35 字。
+   - 强制上限：35 字。若单句台词超长，请在不漏字的前提下在语气点强行拆分。
+5. **拒绝碎片化**：在主语未变、动作连贯的前提下，尽量填满 25-35 字。
 
-【重要原则】
-1. **完整性**：整理后的内容不可遗漏原文中的任何一句话，一个字。不能改变原文故事结构，禁止添加原文以外任何内容。
-2. **时长控制**：必须考虑到配音时长。一个分镜只能停留五秒钟，约35个字符。如果原文句子过长，必须强行拆分成下一行分镜。
-3. **分段逻辑**：
-   - 角色对话切换 -> 下一个分镜
-   - 场景切换 -> 下一个分镜
-   - 动作画面改变 -> 下一个分镜
-   - 单句超过35字 -> 下一个分镜
+【输出要求】：
+- 从编号 {current_shot_idx} 开始。
+- 严禁任何解释、括号、画面词，只输出“数字.文案”。"""
 
-【输出格式】
-请直接输出分镜列表，格式如下（纯数字加点）：
-1.第一段文案
-2.第二段文案
-...
+                        response = client.chat.completions.create(
+                            model=model_id,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": f"请对此文本块进行视觉单元分镜，严禁重复和漏字：\n\n{chunk}"}
+                            ],
+                            temperature=0, 
+                        )
+                        
+                        chunk_res = response.choices[0].message.content.strip()
+                        full_result.append(chunk_res)
+                        
+                        # 更新下一块的起始编号
+                        last_nums = re.findall(r'(\d+)[\.、]', chunk_res)
+                        if last_nums:
+                            current_shot_idx = int(last_nums[-1]) + 1
+                        
+                        progress_bar.progress((idx + 1) / len(chunks))
 
-【待处理文本】
-{flattened_text}
+                # 数据合并与展示
+                final_result = "\n".join(full_result)
+                output_stream = get_pure_text(final_result)
+                output_len = len(output_stream)
+                
+                lines = [l.strip() for l in final_result.split('\n') if re.match(r'^\d+', l.strip())]
+                count = len(lines)
+                
+                analysis_data = []
+                for i, line in enumerate(lines):
+                    content = re.sub(r'^\d+[\.、]\s*', '', line)
+                    ln = len(content)
+                    status = "✅ 理想" if 20 <= ln <= 35 else ("❌ 过长" if ln > 35 else "🟡 偏短")
+                    analysis_data.append({"序号": i+1, "内容预览": content[:20], "长度": ln, "状态": status})
+                df = pd.DataFrame(analysis_data)
 
-请注意：用户上传的文本已经去除了段落，你需要根据语义重新理解并按照上述逻辑进行“微创”分段。
-"""
+                # 看板更新
+                m2.metric("生成分镜总数", f"{count} 组")
+                m3.metric("处理后总字数", f"{output_len} 字")
+                diff = output_len - input_len
+                m4.metric("偏差值", f"{diff} 字", delta_color="inverse")
 
-        # 初始化客户端
-        client = OpenAI(api_key=api_key, base_url=base_url)
-        
-        st.divider()
-        st.subheader("🎥 分镜生成结果")
-        
-        result_container = st.empty()
-        full_response = ""
+                st.divider()
 
-        try:
-            # 流式输出 (Streamlit Cloud 体验更好)
-            stream = client.chat.completions.create(
-                model=model_id,
-                messages=[
-                    {"role": "system", "content": "你是一个严格的电影分镜与时序控制专家。"},
-                    {"role": "user", "content": system_prompt}
-                ],
-                stream=True,
-                temperature=0.7 # 稍微降低创造性，保证忠实原文
-            )
+                # UI 交互
+                c_a, c_b = st.columns([2, 1])
+                with c_a:
+                    st.subheader("🎬 视觉分镜编辑器 (无损还原)")
+                    if diff == 0: st.success("✅ 100% 镜像还原成功")
+                    else: st.error(f"⚠️ 偏差：{diff} 字。提示：正数为重复/脑补，负数为漏字。")
+                    st.text_area("分镜正文", value=final_result, height=600)
 
-            # 接收流
-            for chunk in stream:
-                if chunk.choices[0].delta.content is not None:
-                    content = chunk.choices[0].delta.content
-                    full_response += content
-                    result_container.markdown(full_response)
-            
-            # --- 后处理：结果字数统计 (新增功能) ---
-            # 去掉序号 (1. 2. 等) 再统计，以免影响字数对比
-            # 正则：去除行首的数字和点
-            content_for_count = re.sub(r'^\d+\.', '', full_response, flags=re.MULTILINE)
-            output_count = count_valid_chars(content_for_count)
-            
-            # --- 结果对比面板 ---
-            st.divider()
-            col1, col2, col3 = st.columns(3)
-            col1.metric("原文有效字数", input_count)
-            col2.metric("分镜有效字数", output_count)
-            
-            diff = output_count - input_count
-            if diff == 0:
-                col3.success("✅ 字数完美匹配")
-            elif abs(diff) < 5:
-                col3.warning(f"⚠️ 差异微小 ({diff}字)")
-            else:
-                col3.error(f"❌ 字数差异较大 ({diff}字)，请检查AI是否遗漏")
+                with c_b:
+                    st.subheader("📊 实时视觉节奏分析")
+                    st.dataframe(df, use_container_width=True)
+                    st.metric("平均每镜停留", f"{output_len/count:.1f} 字")
+                    st.download_button("💾 下载最终分镜稿", final_result, "storyboard_v11.txt")
 
-        except Exception as e:
-            st.error(f"发生错误: {str(e)}")
-            st.markdown("建议检查：\n1. API Key 是否正确\n2. 模型名称是否存在\n3. 余额是否充足")
+            except Exception as e:
+                st.error(f"导演系统运行出错：{str(e)}")
