@@ -37,7 +37,7 @@ def force_renumber_by_paragraphs(text_input):
 with st.sidebar:
     st.header("🎬 导演引擎控制台")
     api_key = st.text_input("API Key", type="password")
-    base_url = st.text_input("中转接口地址", value="https://api.bixin123.com/v1")
+    base_url = st.text_input("中转接口地址", value="https://blog.tuiwen.xyz/v1")
     model_id = st.text_input("Model ID", value="grok-4.1")
     st.divider()
     st.markdown("### 🎭 分镜准则：\n1. 剧情驱动 (意群分镜)\n2. 动作闭环\n3. 物理分段即分镜\n4. 偏差值监控（不计标点）")
@@ -140,5 +140,6 @@ if st.session_state.final_script:
         st.download_button("💾 下载脚本", st.session_state.final_script, file_name="storyboard_final.txt")
 
     st.warning("⚠️ 提示：手动微调后，请务必点击【一键自动重编序号】以更新右侧分析报表及偏差值。")
+
 
 
