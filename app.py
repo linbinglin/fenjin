@@ -1,152 +1,233 @@
 import streamlit as st
 from openai import OpenAI
-import os
+import re
 
-# 设置页面基本配置
+# ================= 页面配置 =================
 st.set_page_config(
-    page_title="AI 智能分镜生成助手",
+    page_title="AI 分镜分批生成器",
     page_icon="🎬",
     layout="wide"
 )
 
-# 侧边栏配置
+# ================= Session State 初始化 (用于记忆状态) =================
+if 'processed_result' not in st.session_state:
+    st.session_state.processed_result = ""  # 存储已生成的最终结果
+if 'current_index' not in st.session_state:
+    st.session_state.current_index = 0      # 当前处理到第几个分镜
+if 'source_scenes' not in st.session_state:
+    st.session_state.source_scenes = []     # 拆解后的源文案列表
+if 'is_processing' not in st.session_state:
+    st.session_state.is_processing = False
+
+# ================= 侧边栏设置 =================
 with st.sidebar:
-    st.title("⚙️ 设置")
+    st.title("⚙️ 参数设置")
     
-    # 1. API 配置
-    st.subheader("API 配置")
+    st.subheader("1. 接口配置")
     api_base = st.text_input(
-        "Base URL (中转地址)", 
-        value="https://blog.tuiwen.xyz/v1", # 注意：OpenAI库通常需要在尾部加/v1，如果报错请尝试去掉/v1或咨询服务商
-        help="请输入中转接口地址"
+        "Base URL", 
+        value="https://blog.tuiwen.xyz/v1", 
+        help="第三方中转地址，末尾通常需要/v1"
     )
-    api_key = st.text_input("API Key", type="password", help="请输入你的 API Key")
+    api_key = st.text_input("API Key", type="password")
     
-    # 2. 模型选择 (支持自定义输入)
-    st.subheader("模型选择")
-    model_options = [
-        "gpt-4o", 
-        "claude-3-5-sonnet-20240620", 
-        "deepseek-chat", 
-        "gemini-pro", 
-        "grok-beta", 
-        "doubao-pro-4k"
-    ]
-    selected_model = st.selectbox("选择预设模型", model_options)
-    custom_model = st.text_input("或手动输入 Model ID (优先使用)", placeholder="例如: gpt-4o-2024-05-13")
-    
+    st.subheader("2. 模型选择")
+    # 支持自定义模型ID，优先读取手动输入
+    model_options = ["gpt-4o", "claude-3-5-sonnet-20240620", "deepseek-chat", "gemini-pro"]
+    selected_model = st.selectbox("预设模型", model_options)
+    custom_model = st.text_input("或手动输入 Model ID", placeholder="例如: gpt-4o-2024-08-06")
     final_model = custom_model if custom_model else selected_model
     
     st.divider()
     
-    # 3. 角色设定
-    st.subheader("👤 角色设定 (核心)")
-    st.info("为了保证人物一致性，请详细描述主角的外貌、服装。")
-    character_profile = st.text_area(
-        "人物小传/外貌描写",
-        height=300,
-        placeholder="例如：\n赵清月：清冷美人，眉眼极精致，肤白如雪，银丝蝴蝶坠珠簪，一身白色刺绣绫罗纱衣...\n\n赵灵曦：明艳张扬，杏眼桃色腮，肤白如雪，黄色妆花襦裙..."
+    st.subheader("3. 批处理控制")
+    batch_size = st.slider(
+        "每次让AI处理几个分镜？", 
+        min_value=1, 
+        max_value=10, 
+        value=3, 
+        help="建议设为3-5个。数量越少，AI描述越详细，不易偷懒；数量越多，速度越快但容易简略。"
     )
 
-# 主界面
-st.title("🎬 AI 视频分镜描述生成器")
-st.markdown("上传剧本文件，自动进行分镜拆分、画面描述(Midjourney)及视频指令(即梦AI)生成。")
+    st.divider()
+    st.subheader("4. 角色设定 (必须)")
+    character_profile = st.text_area(
+        "人物小传/外貌描写",
+        height=200,
+        placeholder="赵清月：清冷美人，一身白色刺绣绫罗纱衣...\n赵灵曦：明艳张扬，黄色妆花襦裙..."
+    )
 
-# 4. 文件上传
-uploaded_file = st.file_uploader("📂 上传分镜文案 (支持 .txt, .md)", type=["txt", "md"])
+# ================= 核心函数 =================
 
-# 核心处理逻辑
-if uploaded_file and api_key and character_profile:
-    # 读取文件内容
-    stringio = uploaded_file.getvalue().decode("utf-8")
-    script_content = stringio
+def parse_source_text(text):
+    """
+    智能解析上传的文本，尝试按序号拆分为列表。
+    支持格式：1. / 1、 / NO.1 / 1
+    """
+    # 统一换行符
+    text = text.replace("\r\n", "\n")
+    # 正则：匹配行首的数字加标点，例如 "1." "1、" "1 "
+    # split 会保留分割符，我们需要重新拼接
+    pattern = r'(^|\n)(\d+[.、:：\s])'
+    segments = re.split(pattern, text)
     
-    st.write("### 📄 文案预览")
-    with st.expander("点击查看原始文案"):
-        st.text(script_content)
-
-    # 按钮触发
-    if st.button("🚀 开始生成分镜描述"):
-        client = OpenAI(api_key=api_key, base_url=api_base)
+    scenes = []
+    current_scene = ""
+    
+    for segment in segments:
+        if not segment: continue
+        # 如果是数字开头（匹配结果），说明是新分镜的开始
+        if re.match(r'\d+[.、:：\s]', segment):
+             # 把之前的存入
+            if current_scene.strip():
+                scenes.append(current_scene.strip())
+            current_scene = segment
+        elif segment.strip() == "":
+            continue # 跳过空行
+        else:
+            # 拼接内容
+            current_scene += segment
+            
+    # 存入最后一个
+    if current_scene.strip():
+        scenes.append(current_scene.strip())
         
-        # --- 核心 Prompt 设计 ---
-        # 这里包含了你所有的逻辑要求：拆分、合并、画面视频分离、40字符原则等
-        system_prompt = f"""
-你是一个专业的影视分镜师和AI提示词工程师。你的任务是将用户提供的文案转化为高质量的AI绘画（Midjourney）和AI视频（即梦AI）提示词。
-
-### 核心任务与规则：
-
-1.  **人物一致性（最高优先级）**：
-    *   必须严格使用用户提供的【角色设定】内容。
-    *   在每一个分镜的`画面描述`中，只要出现该角色，必须完整复述其外貌和着装描述（括号内的Tag形式），不得省略，以保证Midjourney生成的人物一致。
-
-2.  **分镜拆分与合并逻辑**：
-    *   **拆分（时长限制）**：视频生成模型每个镜头只能生成约5秒视频（约对应40个中文字符）。
-        *   检查每段文案长度。如果文案超过40个字符，或者包含复杂的连续动作，必须将其拆分为分镜 1-1, 1-2 等。
-        *   拆分时，确保文案与画面时间对齐。
-    *   **合并**：如果连续几句文案非常短（如“他说。”“好的。”），且画面场景不变，请合并为一个分镜，以免画面过于破碎。
-
-3.  **描述分离原则**：
-    *   **画面描述 (用于Midjourney)**：
-        *   只描述**静态**场景、构图、光影、人物状态（站立、坐着）。
-        *   **严禁**出现大幅度的动作动词（如“转身离开”、“跑向远方”），因为MJ画不出连续动作，会导致画面模糊或奇怪。
-        *   格式：场景描述 + (人物外貌Tag)。
-    *   **视频生成 (用于即梦AI)**：
-        *   描述**动态**内容。人物的具体行为（转身、行走、大笑）、镜头的运动（推拉摇移）。
-        *   必须基于“画面描述”生成的静态图来描述动作。
-
-4.  **输出格式要求**：
-    请严格按照以下格式输出每一个分镜（不要使用Markdown表格，直接按块输出）：
-
-    NO.[序号] 文案：[这里放拆分后的对应文案]
-    画面描述：[场景环境描述]，[人物动作状态]，[光影/视角]，(人物1名字，外貌描述Tag)，(人物2名字，外貌描述Tag)
-    视频生成：[具体的动作描述，谁做了什么]，[镜头运镜描述]，[表情变化]
-    ---
-
-### 用户提供的角色设定：
-{character_profile}
-
-### 待处理文案：
-"""
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": script_content}
-        ]
-
-        st.divider()
-        st.write("### 🎬 生成结果")
+    # 如果正则解析失败（列表为空或只有1个），说明用户可能没标号，尝试按空行强行拆
+    if len(scenes) < 2:
+        scenes = [line.strip() for line in text.split('\n') if line.strip()]
         
-        # 创建占位符用于流式输出
-        response_placeholder = st.empty()
-        full_response = ""
+    return scenes
 
-        try:
-            # 流式调用 API
-            stream = client.chat.completions.create(
-                model=final_model,
-                messages=messages,
-                stream=True,
-                temperature=0.7 
-            )
-            
-            for chunk in stream:
-                if chunk.choices[0].delta.content is not None:
-                    content = chunk.choices[0].delta.content
-                    full_response += content
-                    response_placeholder.markdown(full_response)
-            
-            # 生成结束后的提示
-            st.success("✅ 分镜生成完成！你可以复制上方内容使用。")
-            
-        except Exception as e:
-            st.error(f"❌ 发生错误: {str(e)}")
-            st.warning("请检查 API Key、Base URL 是否正确，或者模型 ID 是否可用。")
+def generate_prompt(batch_scenes, profile):
+    """构建发送给AI的 Prompt"""
+    scene_text = "\n\n".join(batch_scenes)
+    
+    return f"""
+你是一个专业的分镜师。你需要处理以下【分镜文案片段】。
+这是用户已经整理好的序号，但可能需要根据时长进一步拆分。
+
+### 核心任务：
+1. **分析文案时长**：视频生成限制每图5秒（约40字）。如果单条文案过长，请在保持原序号基础上拆分为 X-1, X-2。
+2. **画面描述 (Midjourney)**：只描述静态场景、人物状态、构图、光影。必须包含【角色设定】中的外貌Tag。严禁大幅度动作描写。
+3. **视频描述 (即梦AI)**：基于画面图，描述具体的人物动作、运镜、动态变化。
+4. **严格格式**：请直接输出结果，不要废话。
+
+### 角色设定（必须严格遵守外貌）：
+{profile}
+
+### 待处理的分镜文案：
+{scene_text}
+
+### 输出格式示例：
+NO.1 文案：xxxx
+画面描述：[场景]，[静态状态]，(角色名，外貌Tag...)
+视频生成：[动作]，[运镜]
+    """
+
+# ================= 主界面逻辑 =================
+
+st.title("🎬 AI 智能分镜 - 分批生成版")
+st.markdown("上传已编号的分镜稿，**分批次**发送给AI，防止内容中断，保证每个镜头的描述质量。")
+
+# 1. 文件上传
+uploaded_file = st.file_uploader("📂 上传整理好的分镜 (.txt)", type=["txt"])
+
+if uploaded_file:
+    # 只有当文件改变时才重新解析
+    file_content = uploaded_file.getvalue().decode("utf-8")
+    
+    # 如果还没有解析过，或者解析的内容为空，则执行解析
+    if not st.session_state.source_scenes:
+        st.session_state.source_scenes = parse_source_text(file_content)
+        st.toast(f"✅ 成功解析出 {len(st.session_state.source_scenes)} 个分镜片段", icon="🎉")
+
+    # 显示解析概况
+    total_scenes = len(st.session_state.source_scenes)
+    progress = st.session_state.current_index / total_scenes if total_scenes > 0 else 0
+    
+    st.write(f"📊 当前进度：**{st.session_state.current_index} / {total_scenes}**")
+    st.progress(progress)
+
+    # 2. 生成控制区
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        # 判断是否全部完成
+        if st.session_state.current_index < total_scenes:
+            btn_label = "🚀 开始生成" if st.session_state.current_index == 0 else "⏭️ 继续生成下一批"
+            if st.button(btn_label, type="primary"):
+                if not api_key or not character_profile:
+                    st.error("请先在左侧填写 API Key 和 角色设定！")
+                else:
+                    # 准备当前批次的数据
+                    start_idx = st.session_state.current_index
+                    end_idx = min(start_idx + batch_size, total_scenes)
+                    current_batch = st.session_state.source_scenes[start_idx:end_idx]
+                    
+                    # 调用 AI
+                    client = OpenAI(api_key=api_key, base_url=api_base)
+                    
+                    user_prompt = generate_prompt(current_batch, character_profile)
+                    
+                    st.session_state.is_processing = True
+                    
+                    try:
+                        # 显示正在处理的内容
+                        with st.spinner(f"正在分析第 {start_idx+1} 到 {end_idx} 个分镜..."):
+                            response_container = st.empty()
+                            full_response = ""
+                            
+                            stream = client.chat.completions.create(
+                                model=final_model,
+                                messages=[
+                                    {"role": "system", "content": "你是一个严谨的AI分镜助手，严格按照用户要求输出格式。"},
+                                    {"role": "user", "content": user_prompt}
+                                ],
+                                stream=True,
+                                temperature=0.7
+                            )
+                            
+                            # 流式输出当前批次结果
+                            for chunk in stream:
+                                if chunk.choices[0].delta.content:
+                                    content = chunk.choices[0].delta.content
+                                    full_response += content
+                                    response_container.markdown(f"**当前批次预览：**\n\n{full_response}")
+                            
+                            # 追加到总结果中
+                            st.session_state.processed_result += f"\n\n--- 批次 ({start_idx+1}-{end_idx}) ---\n\n" + full_response
+                            
+                            # 更新索引
+                            st.session_state.current_index = end_idx
+                            st.rerun() # 刷新页面更新进度条和按钮状态
+                            
+                    except Exception as e:
+                        st.error(f"发生错误: {str(e)}")
+        else:
+            st.success("🎉 所有分镜已全部处理完毕！")
+            if st.button("🔄 重置所有进度"):
+                st.session_state.current_index = 0
+                st.session_state.processed_result = ""
+                st.rerun()
+
+    # 3. 结果展示区
+    st.divider()
+    st.subheader("📝 最终完整结果")
+    
+    # 提供下载按钮
+    st.download_button(
+        label="💾 下载完整分镜描述 (.txt)",
+        data=st.session_state.processed_result,
+        file_name="ai_storyboard_output.txt",
+        mime="text/plain"
+    )
+    
+    # 显示文本框（只读）
+    st.text_area(
+        "结果预览（可手动编辑复制）", 
+        value=st.session_state.processed_result, 
+        height=600
+    )
 
 else:
-    if not api_key:
-        st.warning("👈 请在左侧侧边栏输入 API Key")
-    if not uploaded_file:
-        st.info("👆 请上传分镜文案文件")
-    if not character_profile:
-        st.info("👈 请在左侧输入角色设定")
+    st.info("👈 请先在左侧上传文案文件")
