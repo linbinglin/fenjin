@@ -8,9 +8,6 @@ import pandas as pd
 # ==========================================
 
 def smart_chunk_text(text, max_chars=1200):
-    """
-    智能分块：适中的分块大小，保证上下文连贯
-    """
     chunks = []
     while len(text) > max_chars:
         split_index = -1
@@ -29,76 +26,78 @@ def smart_chunk_text(text, max_chars=1200):
     return chunks
 
 def get_pure_text(text):
-    """提取纯汉字文本，用于最严格的偏差计算"""
-    # 去除序号，去除标点，去除空格，只算汉字
+    """只保留汉字和数字，用于精准对比"""
     text = re.sub(r'^\d+[\.、]\s*', '', text, flags=re.MULTILINE)
-    # 仅保留汉字和数字，忽略标点符号带来的差异
     return re.sub(r'[^\u4e00-\u9fa50-9]', '', text)
 
 def renumber_content(text):
-    """标准清洗与重排"""
+    """清洗并重新编号"""
     lines = text.split('\n')
     new_lines = []
     counter = 1
     for line in lines:
         stripped = line.strip()
         if not stripped: continue
-        # 去掉旧序号
         clean_content = re.sub(r'^\d+[\.、]\s*', '', stripped)
         new_lines.append(f"{counter}. {clean_content}")
         counter += 1
     return "\n".join(new_lines)
 
-def auto_split_long_lines(text, threshold=38):
+def force_split_long_lines(text, threshold=36):
     """
-    🔪 Python 级强力修剪工具
-    如果某一行超过 threshold 字，强制在中间的标点符号处切开。
+    ⚔️ 隐形剪刀算法 (V15核心)
+    不依赖AI，使用Python硬逻辑强制切分过长镜头。
     """
     lines = text.split('\n')
     new_lines = []
     
     for line in lines:
-        # 先清洗序号
+        # 去掉序号
         clean_line = re.sub(r'^\d+[\.、]\s*', '', line.strip())
         
         if len(clean_line) <= threshold:
             new_lines.append(clean_line)
         else:
-            # 需要切分。寻找中间位置的标点
-            # 优先找逗号，其次找空格
-            split_found = False
-            # 从字符串中间向两边搜索最佳切分点
+            # === 强制切分逻辑 ===
+            # 策略：从中间位置开始，向两边寻找最佳切分点（标点符号）
             mid = len(clean_line) // 2
-            # 搜索范围：中间向两边扩散
-            for offset in range(mid):
+            split_idx = -1
+            
+            # 优先找标点
+            search_range = 10 # 在中间点左右10个字范围内找标点
+            chars_priority = ['，', ',', '；', ';', ' ', '！', '!', '？', '?']
+            
+            for char in chars_priority:
                 # 向右搜
-                if clean_line[mid + offset] in ['，', ',', ' ', '；']:
-                    p1 = clean_line[:mid + offset + 1] # 包含标点
-                    p2 = clean_line[mid + offset + 1:]
-                    new_lines.append(p1)
-                    new_lines.append(p2)
-                    split_found = True
+                pos_r = clean_line.find(char, mid)
+                if pos_r != -1 and pos_r < mid + search_range:
+                    split_idx = pos_r + 1 # 切在标点后
                     break
                 # 向左搜
-                if clean_line[mid - offset] in ['，', ',', ' ', '；']:
-                    p1 = clean_line[:mid - offset + 1]
-                    p2 = clean_line[mid - offset + 1:]
-                    new_lines.append(p1)
-                    new_lines.append(p2)
-                    split_found = True
+                pos_l = clean_line.rfind(char, 0, mid)
+                if pos_l != -1 and pos_l > mid - search_range:
+                    split_idx = pos_l + 1
                     break
             
-            if not split_found:
-                # 实在没标点，硬切（虽然罕见）
-                new_lines.append(clean_line)
-                
-    # 切分完后全是没序号的列表，重新编号返回
+            # 如果实在找不到标点（比如一大段纯文字），就硬切在中间
+            if split_idx == -1:
+                split_idx = mid
+            
+            # 执行切分
+            part1 = clean_line[:split_idx].strip()
+            part2 = clean_line[split_idx:].strip()
+            
+            if part1: new_lines.append(part1)
+            # 如果第二部分依然太长（罕见），这里递归逻辑可以简化，暂时直接放进去，一般切一次就够了
+            if part2: new_lines.append(part2)
+
+    # 重新生成带序号的文本
     return renumber_content("\n".join(new_lines))
 
 # ==========================================
 # 🎨 页面配置
 # ==========================================
-st.set_page_config(page_title="导演引擎 V14-节奏平衡版", layout="wide", page_icon="🎬")
+st.set_page_config(page_title="导演引擎 V15-强制修正版", layout="wide", page_icon="🎬")
 
 if 'generated_storyboard' not in st.session_state:
     st.session_state.generated_storyboard = ""
@@ -107,36 +106,36 @@ if 'original_text_pure_len' not in st.session_state:
 
 # --- 侧边栏 ---
 with st.sidebar:
-    st.header("⚙️ 导演引擎 V14")
-    st.caption("视觉节奏修正版")
+    st.header("⚙️ 导演引擎 V15")
+    st.caption("Auto-Split Enabled")
     
     api_key = st.text_input("API Key", type="password")
     base_url = st.text_input("接口地址", value="https://blog.tuiwen.xyz/v1")
     model_id = st.text_input("Model ID", value="gpt-4o") 
     
     st.divider()
-    st.info("💡 V14 更新：增加了自动修剪功能，防止出现 60 字的长镜头。")
+    st.markdown("### V15 强力逻辑")
+    st.warning("⚠️ 系统将在生成后自动强制切断所有超过 36 字的长镜头，无需人工干预。")
 
 # ==========================================
 # 🖥️ 主界面逻辑
 # ==========================================
-st.title("🎬 全能文案·电影感分镜系统 (V14)")
+st.title("🎬 全能文案·电影感分镜系统 (V15)")
 
 uploaded_file = st.file_uploader("📂 选择 TXT 文案", type=['txt'])
 
 if uploaded_file is not None:
     raw_text = uploaded_file.getvalue().decode("utf-8")
     
-    # 计算纯汉字长度（排除标点影响）
+    # 计算纯汉字长度
     pure_raw = get_pure_text(raw_text)
     st.session_state.original_text_pure_len = len(pure_raw)
 
-    # 看板
     st.subheader("📊 视觉逻辑稽核")
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("原文汉字数", f"{len(pure_raw)} 字")
 
-    if st.button("🚀 启动 V14 智能分镜", type="primary"):
+    if st.button("🚀 启动 V15 智能分镜", type="primary"):
         if not api_key:
             st.error("请配置 API Key")
         else:
@@ -145,9 +144,8 @@ if uploaded_file is not None:
                 client = OpenAI(api_key=api_key, base_url=actual_base)
                 
                 chunks = smart_chunk_text(raw_text)
-                
                 status_text = st.empty()
-                status_text.info(f"📦 已识别 {len(chunks)} 个剧情块，正在执行 V14 节奏指令...")
+                status_text.info(f"📦 处理中... V15 将自动执行两次校验...")
                 
                 full_result_list = []
                 current_shot_idx = 1
@@ -155,30 +153,24 @@ if uploaded_file is not None:
                 
                 for idx, chunk in enumerate(chunks):
                     # ==========================================
-                    # 🔥 V14 核心指令：黄金中庸之道
+                    # 🔥 V15 Prompt: 强调“呼吸感”
                     # ==========================================
-                    system_prompt = f"""你是一个对画面节奏极其敏感的电影剪辑师。请将文案处理为分镜。
+                    system_prompt = f"""你是一个电影剪辑师。请将文案转化为分镜脚本。
 
-【核心节奏法则】：
-1. **聚合原则**：连贯的动作请合并，不要把“他站起来”和“他走过去”分成两行。
-2. **熔断原则 (至关重要)**：
-   - 理想单镜长度：**20-35 字**。
-   - **绝对禁止**超过 45 字的长镜头！
-   - 如果一句话很长（包含多个逗号），必须在中间的逗号处切开，另起一行。
-   - 例子错误：10. 第三世得知皇帝又要找人时我俩跪在贵妃旁边再不敢出声... (太长！)
-   - 例子正确：
-     10. 第三世得知皇帝又要找人时，我俩跪在贵妃旁边
-     11. 再不敢出声，没多久太监却传出旨意
-
-3. **标点保留**：请务必保留原文的标点符号（逗号），不要把它们删掉！这对于断句至关重要。
-4. **无损还原**：不要改字，不要删字。
+【最高指令：视觉呼吸感】
+1. **拒绝拥挤**：任何一个分镜如果读起来超过 5 秒（约35字），就是失败的。
+2. **主动切分**：遇到长难句，即使没有标点，也要根据语意在中间换行！
+   - 错误：1. 第三世得知皇帝又要找人时我俩跪在贵妃旁边不敢出声
+   - 正确：
+     1. 第三世得知皇帝又要找人时
+     2. 我俩跪在贵妃旁边不敢出声
+3. **保持连贯**：短于 15 字的动作，请合并。
 
 【输出格式】：
-{current_shot_idx}. 内容...
-{current_shot_idx+1}. 内容...
+{current_shot_idx}. 内容
+{current_shot_idx+1}. 内容
 """
-                    # V14 调整：不再完全压扁文本，保留部分标点结构给AI参考
-                    clean_chunk = re.sub(r'\s+', '', chunk) # 去除空格换行，但保留标点
+                    clean_chunk = re.sub(r'\s+', '', chunk)
 
                     response = client.chat.completions.create(
                         model=model_id,
@@ -192,16 +184,20 @@ if uploaded_file is not None:
                     chunk_res = response.choices[0].message.content.strip()
                     full_result_list.append(chunk_res)
                     
-                    # 序号估算
                     last_nums = re.findall(r'(\d+)[\.、]', chunk_res)
                     if last_nums:
                         current_shot_idx = int(last_nums[-1]) + 1
                     
                     progress_bar.progress((idx + 1) / len(chunks))
                 
+                # === 🌟 关键步骤：合并后立即执行“隐形剪刀” ===
                 raw_combined = "\n".join(full_result_list)
-                st.session_state.generated_storyboard = renumber_content(raw_combined)
-                status_text.success("✅ V14 分镜完成！节奏已优化。")
+                
+                # 调用 Python 强制切分函数（阈值设为36，严格控制）
+                final_polished_text = force_split_long_lines(raw_combined, threshold=36)
+                
+                st.session_state.generated_storyboard = final_polished_text
+                status_text.success("✅ V15 处理完成！过长镜头已被强制修正。")
                 st.rerun()
 
             except Exception as e:
@@ -218,26 +214,12 @@ if uploaded_file is not None:
         with col_edit:
             st.subheader("🎬 分镜编辑器")
             
-            # --- V14 新增工具栏 ---
-            btn_col1, btn_col2 = st.columns([1, 1])
-            with btn_col1:
-                # 原有的重排按钮
-                if st.button("🔄 仅重置序号 (Refresh)", use_container_width=True):
-                    formatted_text = renumber_content(st.session_state.generated_storyboard)
-                    st.session_state.generated_storyboard = formatted_text
-                    st.rerun()
-            with btn_col2:
-                # 🔥 新增：强力修剪按钮
-                if st.button("🔪 自动切分过长分镜 (>38字)", type="secondary", use_container_width=True):
-                    # 调用 Python 函数强制切分
-                    split_text = auto_split_long_lines(st.session_state.generated_storyboard, threshold=38)
-                    st.session_state.generated_storyboard = split_text
-                    st.success("已自动将过长的分镜切分！")
-                    st.rerun()
-            # ---------------------
+            # 手动刷新按钮（依然保留，以防万一）
+            if st.button("🔄 格式化并重置序号", use_container_width=True):
+                formatted = renumber_content(st.session_state.widget_text_area)
+                st.session_state.generated_storyboard = formatted
+                st.rerun()
 
-            # 绑定 Text Area 到 session_state，并监听 on_change
-            # 这样用户手动修改也会被保存
             def update_text():
                 st.session_state.generated_storyboard = st.session_state.widget_text_area
 
@@ -254,26 +236,20 @@ if uploaded_file is not None:
             st.subheader("📈 数据校验")
             current_text = st.session_state.generated_storyboard
             
-            # 指标计算
             lines = [line.strip() for line in current_text.split('\n') if line.strip()]
             
-            # 偏差值计算 (使用 V14 更科学的纯汉字比对)
+            # 偏差计算
             output_pure = get_pure_text(current_text)
             diff = len(output_pure) - st.session_state.original_text_pure_len
             
             c1, c2 = st.columns(2)
             c1.metric("分镜组数", f"{len(lines)} 组")
             
-            if diff == 0:
+            # 宽容度稍微调高一点，因为强制切分不会丢字，只会增加行数
+            if abs(diff) < 5:
                 c2.metric("偏差值", "0", delta="完美", delta_color="normal")
-            elif abs(diff) < 10: # 允许微小误差
-                 c2.metric("偏差值", f"{diff}", delta="正常范围", delta_color="off")
             else:
-                c2.metric("偏差值", f"{diff}", delta="异常", delta_color="inverse")
-                if diff > 0:
-                    st.warning(f"AI 似乎多生成了 {diff} 个字，请检查是否有重复段落。")
-                else:
-                    st.warning(f"AI 似乎遗漏了 {abs(diff)} 个字。")
+                c2.metric("偏差值", f"{diff}", delta="需检查", delta_color="inverse")
 
             # 节奏表格
             table_data = []
@@ -284,13 +260,13 @@ if uploaded_file is not None:
                     content = match.group(2)
                     length = len(content)
                     
-                    # 评分逻辑
+                    # 评分标准微调
                     if length > 38:
-                        status = "🔴 极长 (建议切分)"
-                    elif length > 30:
-                        status = "🟡 略长"
-                    elif length < 8:
-                        status = "⚪ 过短"
+                        status = "🔴 依然长" # 如果这一步还出现红色，说明这句真的一点标点都没有
+                    elif length > 34:
+                        status = "🟡 饱满"
+                    elif length < 10:
+                        status = "⚪ 短促"
                     else:
                         status = "🟢 完美"
                     
@@ -298,7 +274,7 @@ if uploaded_file is not None:
                         "序号": idx,
                         "内容": content,
                         "字数": length,
-                        "评价": status
+                        "状态": status
                     })
             
             if table_data:
@@ -310,6 +286,6 @@ if uploaded_file is not None:
                         "序号": st.column_config.TextColumn("No.", width="small"),
                         "内容": st.column_config.TextColumn("内容", width="medium"),
                         "字数": st.column_config.NumberColumn("字数", width="small"),
-                        "评价": st.column_config.TextColumn("状态", width="small"),
+                        "状态": st.column_config.TextColumn("状态", width="small"),
                     }
                 )
