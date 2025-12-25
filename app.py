@@ -41,16 +41,14 @@ def renumber_content(text):
 
 def recursive_split(text, threshold=38):
     """
-    ⚔️ 递归强力切分逻辑
+    递归切分工具（保留给用户手动修剪长句用）
     """
     text = text.strip()
     if not text: return []
     if len(text) <= threshold: return [text]
     
-    # 寻找切分点
     mid = len(text) // 2
     split_idx = -1
-    # 优先找标点
     for i in range(mid, 5, -1):
         if text[i] in ['，', ',', ' ', '；', ';', '。', '！', '？', '：', ':']:
             split_idx = i + 1
@@ -60,7 +58,6 @@ def recursive_split(text, threshold=38):
         
     part1 = text[:split_idx].strip()
     part2 = text[split_idx:].strip()
-    
     return recursive_split(part1, threshold) + recursive_split(part2, threshold)
 
 def auto_split_all_lines(full_text, threshold=38):
@@ -74,29 +71,30 @@ def auto_split_all_lines(full_text, threshold=38):
 # ==========================================
 # 🎨 页面配置与状态管理
 # ==========================================
-st.set_page_config(page_title="导演引擎 V18-对话修复版", layout="wide", page_icon="🎬")
+st.set_page_config(page_title="导演引擎 V19-叙事聚合版", layout="wide", page_icon="🎬")
 
 if 'generated_storyboard' not in st.session_state:
     st.session_state.generated_storyboard = ""
 if 'original_text_pure_len' not in st.session_state:
     st.session_state.original_text_pure_len = 0
-    
-# 🔥 核心修复：引入 editor_key 来强制刷新 UI
 if 'editor_key' not in st.session_state:
     st.session_state.editor_key = 0
 
 # --- 侧边栏 ---
 with st.sidebar:
-    st.header("⚙️ 导演引擎 V18")
-    st.caption("UI Refresh & Dialogue Fix")
+    st.header("⚙️ 导演引擎 V19")
+    st.caption("Visual Aggregation Logic")
     api_key = st.text_input("API Key", type="password")
     base_url = st.text_input("接口地址", value="https://blog.tuiwen.xyz/v1")
     model_id = st.text_input("Model ID", value="gpt-4o") 
+    
+    st.divider()
+    st.info("💡 V19 核心调整：针对‘太碎’问题，增强了连贯叙事的合并能力。")
 
 # ==========================================
 # 🖥️ 主界面
 # ==========================================
-st.title("🎬 全能文案·电影感分镜系统 (V18)")
+st.title("🎬 全能文案·电影感分镜系统 (V19)")
 
 uploaded_file = st.file_uploader("📂 选择 TXT 文案", type=['txt'])
 
@@ -111,7 +109,7 @@ if uploaded_file is not None:
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("原文汉字数", f"{st.session_state.original_text_pure_len} 字")
 
-    if st.button("🚀 启动 V18 智能分镜", type="primary"):
+    if st.button("🚀 启动 V19 智能分镜", type="primary"):
         if not api_key:
             st.error("请配置 API Key")
         else:
@@ -121,7 +119,7 @@ if uploaded_file is not None:
                 chunks = smart_chunk_text(raw_text)
                 
                 status = st.empty()
-                status.info("正在进行 V18 对话逻辑拆解...")
+                status.info("正在执行 V19 视觉聚合指令...")
                 
                 full_result_list = []
                 current_shot_idx = 1
@@ -129,37 +127,39 @@ if uploaded_file is not None:
                 
                 for idx, chunk in enumerate(chunks):
                     # ==========================================
-                    # 🔥 V18 Prompt: 针对你截图中的问题进行了定向狙击
+                    # 🔥 V19 Prompt: 强调“语义完整”和“合并短句”
                     # ==========================================
-                    system_prompt = f"""你是一个对“台词归属”有洁癖的分镜导演。
+                    system_prompt = f"""你是一个懂得“镜头语言”的导演。请将文案转化为分镜列表。
 
-【核心铁律】：
-1. **对话必须独立**：严禁将【心理描写】和【口头台词】放在同一行！
-   - ❌ 错误：我看着她冷笑你说你去倒了偏殿的夜壶
-   - ✅ 正确：
-     1. 我看着她冷笑
-     2. 你说你去倒了偏殿的夜壶
+【核心心法：聚合与切分】
+你的目标是生成**饱满**的镜头（每行约 20-35 字），而不是碎片。
 
-2. **一人一句**：严禁将【两个人的台词】放在同一行！
-   - ❌ 错误：偏殿早锁了你是怎么进去的我找了太监帮忙她辩解道
-   - ✅ 正确：
-     1. 偏殿早锁了，你是怎么进去的
-     2. 我找了太监帮忙，她辩解道
+1. **叙事合并（重要！）**：
+   - 遇到连续的短句描述、内心独白、连贯动作，只要总字数不超过 35 字，**必须合并**在同一行！
+   - ❌ 错误（太碎）：
+     1. 让我坐在旁边
+     2. 亲手画下他们缠绵的每一幕
+   - ✅ 正确（画面完整）：
+     1. 让我坐在旁边，亲手画下他们缠绵的每一幕
 
-3. **长度控制**：单行尽量不要超过 35 字，在逗号处切分。
+2. **对话切分**：
+   - 只有当【说话人改变】或【对话与心理活动混杂】时，才必须换行。
+   
+3. **节奏控制**：
+   - 理想长度：20-35 字。
+   - 除非句子极短（<5字）且表示强调，否则不要单独成行。
+
 4. **无损还原**：保留所有汉字。
 
 【起始编号】：{current_shot_idx}
 """
-                    # 技巧：把文案中的 "“" 和 "”" 替换为空格，或者让AI自己去识别语义
-                    # 这里保持 raw text 传入，依靠 Prompt 修正
                     clean_chunk = re.sub(r'\s+', '', chunk)
                     
                     response = client.chat.completions.create(
                         model=model_id,
                         messages=[{"role": "system", "content": system_prompt},
                                   {"role": "user", "content": clean_chunk}],
-                        temperature=0.1
+                        temperature=0.2 # 稍微提高一点点温度，让它敢于合并
                     )
                     chunk_res = response.choices[0].message.content.strip()
                     full_result_list.append(chunk_res)
@@ -170,7 +170,6 @@ if uploaded_file is not None:
                 
                 raw_combined = "\n".join(full_result_list)
                 st.session_state.generated_storyboard = renumber_content(raw_combined)
-                # 🔥 关键：更新 Key，强制刷新编辑器
                 st.session_state.editor_key += 1 
                 st.rerun()
 
@@ -180,7 +179,7 @@ if uploaded_file is not None:
     st.divider()
 
     # ==========================================
-    # 📝 核心交互区 (UI 修复版)
+    # 📝 核心交互区
     # ==========================================
     if st.session_state.generated_storyboard:
         col_edit, col_analyze = st.columns([1.8, 1.2])
@@ -193,29 +192,25 @@ if uploaded_file is not None:
                 if st.button("🔄 仅重置序号", use_container_width=True):
                     formatted = renumber_content(st.session_state.generated_storyboard)
                     st.session_state.generated_storyboard = formatted
-                    st.session_state.editor_key += 1 # 强制刷新
+                    st.session_state.editor_key += 1 
                     st.rerun()
             
             with b2:
-                # 🔥 修复了点击无反应的 Bug
-                if st.button("✂️ 强力切分 (>38字)", type="primary", use_container_width=True):
+                # 保留剪刀工具，以防万一
+                if st.button("✂️ 强力切分 (>38字)", type="secondary", use_container_width=True):
                     split_text = auto_split_all_lines(st.session_state.generated_storyboard, threshold=38)
                     st.session_state.generated_storyboard = split_text
-                    # 🌟 这一行代码解决了你的截图问题
                     st.session_state.editor_key += 1 
                     st.rerun()
 
-            # 🔥 动态 Key 绑定
             current_val = st.text_area(
                 "editor",
                 value=st.session_state.generated_storyboard,
                 height=600,
-                # 每次 key 变化，Streamlit 都会把它当做一个新组件重新渲染
                 key=f"editor_area_{st.session_state.editor_key}", 
                 label_visibility="collapsed"
             )
             
-            # 双向绑定：用户手动打字也能保存
             if current_val != st.session_state.generated_storyboard:
                 st.session_state.generated_storyboard = current_val
 
@@ -224,7 +219,6 @@ if uploaded_file is not None:
             current_text = st.session_state.generated_storyboard
             lines = [line.strip() for line in current_text.split('\n') if line.strip()]
             
-            # 偏差计算
             output_pure = get_pure_text(current_text)
             diff = len(output_pure) - st.session_state.original_text_pure_len
             
@@ -234,11 +228,10 @@ if uploaded_file is not None:
             if diff == 0:
                 c2.metric("偏差值", "0", delta="完美", delta_color="normal")
             elif diff > 0:
-                c2.metric("偏差值", f"+{diff}", delta="重复/增生", delta_color="inverse")
+                c2.metric("偏差值", f"+{diff}", delta="重复", delta_color="inverse")
             else:
                 c2.metric("偏差值", f"{diff}", delta="漏字", delta_color="inverse")
 
-            # 表格
             table_data = []
             for line in lines:
                 match = re.match(r'(\d+)[\.、]\s*(.*)', line)
@@ -246,8 +239,22 @@ if uploaded_file is not None:
                     idx = match.group(1)
                     content = match.group(2)
                     length = len(content)
-                    status = "🔴 极长" if length > 38 else "🟢 完美"
+                    # 评分标准调整：
+                    if length > 38: status = "🔴 极长"
+                    elif length < 10: status = "⚪ 过碎" # <10字 标记为“过碎”，提醒用户或AI
+                    else: status = "🟢 饱满"
+                    
                     table_data.append({"序号": idx, "内容": content, "字数": length, "状态": status})
             
             if table_data:
-                st.dataframe(pd.DataFrame(table_data), use_container_width=True, height=500)
+                st.dataframe(
+                    pd.DataFrame(table_data), 
+                    use_container_width=True, 
+                    height=500,
+                    column_config={
+                        "序号": st.column_config.TextColumn("No.", width="small"),
+                        "内容": st.column_config.TextColumn("内容", width="medium"),
+                        "字数": st.column_config.NumberColumn("字数", width="small"),
+                        "状态": st.column_config.TextColumn("节奏评价", width="medium"),
+                    }
+                )
