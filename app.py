@@ -1,301 +1,152 @@
 import streamlit as st
 from openai import OpenAI
-import re
-import pandas as pd
+import os
 
-# ==========================================
-# 🛠️ 核心工具函数库
-# ==========================================
+# 设置页面基本配置
+st.set_page_config(
+    page_title="AI 智能分镜生成助手",
+    page_icon="🎬",
+    layout="wide"
+)
 
-def smart_chunk_text(text, max_chars=1200):
-    chunks = []
-    while len(text) > max_chars:
-        split_index = -1
-        for mark in ["\n\n", "。", "！", "？"]:
-            pos = text.rfind(mark, 0, max_chars)
-            split_index = max(split_index, pos)
-        if split_index == -1: split_index = max_chars
-        else: split_index += 1 
-        chunks.append(text[:split_index].strip())
-        text = text[split_index:]
-    if text.strip(): chunks.append(text.strip())
-    return chunks
-
-def get_pure_text(text):
-    """只保留汉字数字，用于精确核对偏差"""
-    text = re.sub(r'^\d+[\.、]\s*', '', text, flags=re.MULTILINE)
-    return re.sub(r'[^\u4e00-\u9fa50-9]', '', text)
-
-def renumber_content(text):
-    """重排序号"""
-    lines = text.split('\n')
-    new_lines = []
-    counter = 1
-    for line in lines:
-        stripped = line.strip()
-        if not stripped: continue
-        clean = re.sub(r'^\d+[\.、]\s*', '', stripped)
-        new_lines.append(f"{counter}. {clean}")
-        counter += 1
-    return "\n".join(new_lines)
-
-def clean_hallucinations(text):
-    """
-    🧹 V20 新增：加戏清洗器
-    强制删除 AI 可能添加的“镜头、画面、特写”等非原文词汇
-    """
-    lines = text.split('\n')
-    cleaned_lines = []
-    
-    # 定义必须杀掉的“导演词汇”
-    forbidden_patterns = [
-        r'^镜头.*?[：:]', r'^画面.*?[：:]', r'^特写.*?[：:]', r'^中景.*?[：:]',
-        r'（.*?）', r'\(.*?\)', # 去掉括号里的动作指导
-        r'镜头缓缓.*?', r'低声叙述[：:]'
-    ]
-    
-    for line in lines:
-        content = line
-        # 先分离序号
-        match = re.match(r'(\d+[\.、]\s*)(.*)', line)
-        if match:
-            prefix = match.group(1)
-            body = match.group(2)
-            
-            # 清洗 body 部分
-            for pat in forbidden_patterns:
-                body = re.sub(pat, '', body).strip()
-            
-            # 重新组合
-            cleaned_lines.append(f"{prefix}{body}")
-        else:
-            cleaned_lines.append(line)
-            
-    return "\n".join(cleaned_lines)
-
-def recursive_split(text, threshold=35):
-    """
-    递归切分工具（阈值调紧至35）
-    """
-    text = text.strip()
-    if not text: return []
-    if len(text) <= threshold: return [text]
-    
-    mid = len(text) // 2
-    split_idx = -1
-    # 优先找标点
-    for i in range(mid, 5, -1):
-        if text[i] in ['，', ',', ' ', '；', ';', '。', '！', '？', '：', ':']:
-            split_idx = i + 1
-            break
-            
-    if split_idx == -1: split_idx = threshold 
-        
-    part1 = text[:split_idx].strip()
-    part2 = text[split_idx:].strip()
-    return recursive_split(part1, threshold) + recursive_split(part2, threshold)
-
-def auto_split_all_lines(full_text, threshold=35):
-    lines = full_text.split('\n')
-    final_lines = []
-    for line in lines:
-        clean_line = re.sub(r'^\d+[\.、]\s*', '', line.strip())
-        final_lines.extend(recursive_split(clean_line, threshold))
-    return renumber_content("\n".join(final_lines))
-
-# ==========================================
-# 🎨 页面配置
-# ==========================================
-st.set_page_config(page_title="导演引擎 V20-严谨纯净版", layout="wide", page_icon="🎬")
-
-if 'generated_storyboard' not in st.session_state:
-    st.session_state.generated_storyboard = ""
-if 'original_text_pure_len' not in st.session_state:
-    st.session_state.original_text_pure_len = 0
-if 'editor_key' not in st.session_state:
-    st.session_state.editor_key = 0
-
-# --- 侧边栏 ---
+# 侧边栏配置
 with st.sidebar:
-    st.header("⚙️ 导演引擎 V20")
-    st.caption("Anti-Hallucination & Logic Isolation")
-    api_key = st.text_input("API Key", type="password")
-    base_url = st.text_input("接口地址", value="https://blog.tuiwen.xyz/v1")
-    model_id = st.text_input("Model ID", value="gpt-4o") 
+    st.title("⚙️ 设置")
+    
+    # 1. API 配置
+    st.subheader("API 配置")
+    api_base = st.text_input(
+        "Base URL (中转地址)", 
+        value="https://blog.tuiwen.xyz/v1", # 注意：OpenAI库通常需要在尾部加/v1，如果报错请尝试去掉/v1或咨询服务商
+        help="请输入中转接口地址"
+    )
+    api_key = st.text_input("API Key", type="password", help="请输入你的 API Key")
+    
+    # 2. 模型选择 (支持自定义输入)
+    st.subheader("模型选择")
+    model_options = [
+        "gpt-4o", 
+        "claude-3-5-sonnet-20240620", 
+        "deepseek-chat", 
+        "gemini-pro", 
+        "grok-beta", 
+        "doubao-pro-4k"
+    ]
+    selected_model = st.selectbox("选择预设模型", model_options)
+    custom_model = st.text_input("或手动输入 Model ID (优先使用)", placeholder="例如: gpt-4o-2024-05-13")
+    
+    final_model = custom_model if custom_model else selected_model
     
     st.divider()
-    st.info("💡 V20 核心：去除了AI的导演权限，禁止加戏；强制分离叙述与对话。")
-
-# ==========================================
-# 🖥️ 主界面
-# ==========================================
-st.title("🎬 全能文案·电影感分镜系统 (V20)")
-
-uploaded_file = st.file_uploader("📂 选择 TXT 文案", type=['txt'])
-
-if uploaded_file is not None:
-    raw_text = uploaded_file.getvalue().decode("utf-8")
-    pure_raw = get_pure_text(raw_text)
     
-    if st.session_state.original_text_pure_len == 0 or len(pure_raw) != st.session_state.original_text_pure_len:
-         st.session_state.original_text_pure_len = len(pure_raw)
+    # 3. 角色设定
+    st.subheader("👤 角色设定 (核心)")
+    st.info("为了保证人物一致性，请详细描述主角的外貌、服装。")
+    character_profile = st.text_area(
+        "人物小传/外貌描写",
+        height=300,
+        placeholder="例如：\n赵清月：清冷美人，眉眼极精致，肤白如雪，银丝蝴蝶坠珠簪，一身白色刺绣绫罗纱衣...\n\n赵灵曦：明艳张扬，杏眼桃色腮，肤白如雪，黄色妆花襦裙..."
+    )
 
-    st.subheader("📊 视觉逻辑稽核")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("原文汉字数", f"{st.session_state.original_text_pure_len} 字")
+# 主界面
+st.title("🎬 AI 视频分镜描述生成器")
+st.markdown("上传剧本文件，自动进行分镜拆分、画面描述(Midjourney)及视频指令(即梦AI)生成。")
 
-    if st.button("🚀 启动 V20 严谨分镜", type="primary"):
-        if not api_key:
-            st.error("请配置 API Key")
-        else:
-            try:
-                actual_base = base_url.split('/chat')[0].strip()
-                client = OpenAI(api_key=api_key, base_url=actual_base)
-                chunks = smart_chunk_text(raw_text)
-                
-                status = st.empty()
-                status.info("执行 V20 净化指令：禁止加戏，台词隔离...")
-                
-                full_result_list = []
-                current_shot_idx = 1
-                progress_bar = st.progress(0)
-                
-                for idx, chunk in enumerate(chunks):
-                    # ==========================================
-                    # 🔥 V20 Prompt: 严禁加戏 + 强制隔离
-                    # ==========================================
-                    system_prompt = f"""你是一个没有感情的【文本切分机器】，绝对不是导演，禁止发挥想象力。
+# 4. 文件上传
+uploaded_file = st.file_uploader("📂 上传分镜文案 (支持 .txt, .md)", type=["txt", "md"])
 
-【最高禁令 (Forbidden)】：
-1. **严禁添加原文没有的词**：禁止出现“镜头推近”、“画面”、“特写”、“旁白”等词汇！
-2. **严禁修改原文**：原文是什么字，输出就是什么字。
+# 核心处理逻辑
+if uploaded_file and api_key and character_profile:
+    # 读取文件内容
+    stringio = uploaded_file.getvalue().decode("utf-8")
+    script_content = stringio
+    
+    st.write("### 📄 文案预览")
+    with st.expander("点击查看原始文案"):
+        st.text(script_content)
 
-【切分逻辑 (Isolation)】：
-1. **台词必须独立**：
-   - 只要出现冒号（：）或引号，说明有人说话，**必须**另起一行！
-   - ❌ 错误：男人说道：这画真好
-   - ✅ 正确：
-     1. 男人说道
-     2. 这画真好
-     
-2. **多事件切分**：
-   - 如果一行里包含了【动作 A】和【动作 B】，且总长超过 30 字，请在中间切开。
-   - ❌ 错误：床帷顺势落下，卖力的声音不减，所有的目光都聚集在我身上
-   - ✅ 正确（事件拆分）：
-     1. 床帷顺势落下，卖力的声音不减
-     2. 所有的目光都聚集在我身上
-
-3. **叙事合并**：
-   - 仅限【同一主语】的连续短动作可以合并。
-   - 比如“我是画师，一笔一划...”可以合并。
-
-【起始编号】：{current_shot_idx}
-"""
-                    clean_chunk = re.sub(r'\s+', '', chunk)
-                    
-                    response = client.chat.completions.create(
-                        model=model_id,
-                        messages=[{"role": "system", "content": system_prompt},
-                                  {"role": "user", "content": clean_chunk}],
-                        temperature=0 # 绝对零度，禁止任何创造性
-                    )
-                    chunk_res = response.choices[0].message.content.strip()
-                    full_result_list.append(chunk_res)
-                    
-                    last_nums = re.findall(r'(\d+)[\.、]', chunk_res)
-                    if last_nums: current_shot_idx = int(last_nums[-1]) + 1
-                    progress_bar.progress((idx + 1) / len(chunks))
-                
-                raw_combined = "\n".join(full_result_list)
-                
-                # 🔥 运行后处理清洗器，杀掉漏网的“镜头词”
-                cleaned_text = clean_hallucinations(raw_combined)
-                
-                st.session_state.generated_storyboard = renumber_content(cleaned_text)
-                st.session_state.editor_key += 1 
-                st.rerun()
-
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
-
-    st.divider()
-
-    # ==========================================
-    # 📝 核心交互区
-    # ==========================================
-    if st.session_state.generated_storyboard:
-        col_edit, col_analyze = st.columns([1.8, 1.2])
+    # 按钮触发
+    if st.button("🚀 开始生成分镜描述"):
+        client = OpenAI(api_key=api_key, base_url=api_base)
         
-        with col_edit:
-            st.subheader("🎬 分镜编辑器")
-            
-            b1, b2 = st.columns([1, 1])
-            with b1:
-                if st.button("🔄 仅重置序号", use_container_width=True):
-                    formatted = renumber_content(st.session_state.generated_storyboard)
-                    st.session_state.generated_storyboard = formatted
-                    st.session_state.editor_key += 1 
-                    st.rerun()
-            
-            with b2:
-                # 阈值调整为 35
-                if st.button("✂️ 强力切分 (>35字)", type="primary", use_container_width=True):
-                    split_text = auto_split_all_lines(st.session_state.generated_storyboard, threshold=35)
-                    st.session_state.generated_storyboard = split_text
-                    st.session_state.editor_key += 1 
-                    st.rerun()
+        # --- 核心 Prompt 设计 ---
+        # 这里包含了你所有的逻辑要求：拆分、合并、画面视频分离、40字符原则等
+        system_prompt = f"""
+你是一个专业的影视分镜师和AI提示词工程师。你的任务是将用户提供的文案转化为高质量的AI绘画（Midjourney）和AI视频（即梦AI）提示词。
 
-            current_val = st.text_area(
-                "editor",
-                value=st.session_state.generated_storyboard,
-                height=600,
-                key=f"editor_area_{st.session_state.editor_key}", 
-                label_visibility="collapsed"
+### 核心任务与规则：
+
+1.  **人物一致性（最高优先级）**：
+    *   必须严格使用用户提供的【角色设定】内容。
+    *   在每一个分镜的`画面描述`中，只要出现该角色，必须完整复述其外貌和着装描述（括号内的Tag形式），不得省略，以保证Midjourney生成的人物一致。
+
+2.  **分镜拆分与合并逻辑**：
+    *   **拆分（时长限制）**：视频生成模型每个镜头只能生成约5秒视频（约对应40个中文字符）。
+        *   检查每段文案长度。如果文案超过40个字符，或者包含复杂的连续动作，必须将其拆分为分镜 1-1, 1-2 等。
+        *   拆分时，确保文案与画面时间对齐。
+    *   **合并**：如果连续几句文案非常短（如“他说。”“好的。”），且画面场景不变，请合并为一个分镜，以免画面过于破碎。
+
+3.  **描述分离原则**：
+    *   **画面描述 (用于Midjourney)**：
+        *   只描述**静态**场景、构图、光影、人物状态（站立、坐着）。
+        *   **严禁**出现大幅度的动作动词（如“转身离开”、“跑向远方”），因为MJ画不出连续动作，会导致画面模糊或奇怪。
+        *   格式：场景描述 + (人物外貌Tag)。
+    *   **视频生成 (用于即梦AI)**：
+        *   描述**动态**内容。人物的具体行为（转身、行走、大笑）、镜头的运动（推拉摇移）。
+        *   必须基于“画面描述”生成的静态图来描述动作。
+
+4.  **输出格式要求**：
+    请严格按照以下格式输出每一个分镜（不要使用Markdown表格，直接按块输出）：
+
+    NO.[序号] 文案：[这里放拆分后的对应文案]
+    画面描述：[场景环境描述]，[人物动作状态]，[光影/视角]，(人物1名字，外貌描述Tag)，(人物2名字，外貌描述Tag)
+    视频生成：[具体的动作描述，谁做了什么]，[镜头运镜描述]，[表情变化]
+    ---
+
+### 用户提供的角色设定：
+{character_profile}
+
+### 待处理文案：
+"""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": script_content}
+        ]
+
+        st.divider()
+        st.write("### 🎬 生成结果")
+        
+        # 创建占位符用于流式输出
+        response_placeholder = st.empty()
+        full_response = ""
+
+        try:
+            # 流式调用 API
+            stream = client.chat.completions.create(
+                model=final_model,
+                messages=messages,
+                stream=True,
+                temperature=0.7 
             )
             
-            if current_val != st.session_state.generated_storyboard:
-                st.session_state.generated_storyboard = current_val
+            for chunk in stream:
+                if chunk.choices[0].delta.content is not None:
+                    content = chunk.choices[0].delta.content
+                    full_response += content
+                    response_placeholder.markdown(full_response)
+            
+            # 生成结束后的提示
+            st.success("✅ 分镜生成完成！你可以复制上方内容使用。")
+            
+        except Exception as e:
+            st.error(f"❌ 发生错误: {str(e)}")
+            st.warning("请检查 API Key、Base URL 是否正确，或者模型 ID 是否可用。")
 
-        with col_analyze:
-            st.subheader("📈 数据校验")
-            current_text = st.session_state.generated_storyboard
-            lines = [line.strip() for line in current_text.split('\n') if line.strip()]
-            
-            output_pure = get_pure_text(current_text)
-            diff = len(output_pure) - st.session_state.original_text_pure_len
-            
-            c1, c2 = st.columns(2)
-            c1.metric("分镜组数", f"{len(lines)} 组")
-            
-            # 宽容度处理：只要误差在 20 字以内（可能是标点引起的误判），就算完美
-            if abs(diff) < 20:
-                c2.metric("偏差值", f"{diff}", delta="正常范围", delta_color="normal")
-            else:
-                c2.metric("偏差值", f"{diff}", delta="需检查", delta_color="inverse")
-
-            table_data = []
-            for line in lines:
-                match = re.match(r'(\d+)[\.、]\s*(.*)', line)
-                if match:
-                    idx = match.group(1)
-                    content = match.group(2)
-                    length = len(content)
-                    
-                    if length > 35: status = "🔴 较长" # 阈值降到35
-                    elif length < 8: status = "⚪ 短句"
-                    else: status = "🟢 完美"
-                    
-                    table_data.append({"序号": idx, "内容": content, "字数": length, "状态": status})
-            
-            if table_data:
-                st.dataframe(
-                    pd.DataFrame(table_data), 
-                    use_container_width=True, 
-                    height=500,
-                    column_config={
-                        "序号": st.column_config.TextColumn("No.", width="small"),
-                        "内容": st.column_config.TextColumn("内容", width="medium"),
-                        "字数": st.column_config.NumberColumn("字数", width="small"),
-                        "状态": st.column_config.TextColumn("评价", width="small"),
-                    }
-                )
+else:
+    if not api_key:
+        st.warning("👈 请在左侧侧边栏输入 API Key")
+    if not uploaded_file:
+        st.info("👆 请上传分镜文案文件")
+    if not character_profile:
+        st.info("👈 请在左侧输入角色设定")
