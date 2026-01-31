@@ -5,36 +5,44 @@ from pydub import AudioSegment
 import io
 
 st.set_page_config(page_title="AI小说配音工具", layout="wide")
-st.title("AI小说配音程序（支持IndexTTS2云端配音）")
+st.title("AI小说配音程序（自部署云端IndexTTS2）")
 
 # 侧边栏配置
-st.sidebar.header("API 与模型配置")
-api_key = st.sidebar.text_input("Yunwu.ai API Key", type="password")
-if not api_key:
-    st.warning("请在侧边栏输入您的 Yunwu.ai API Key")
+st.sidebar.header("API 配置")
+
+# Yunwu.ai 用于角色识别
+yunwu_api_key = st.sidebar.text_input("Yunwu.ai API Key (用于角色识别)", type="password")
+if not yunwu_api_key:
+    st.sidebar.warning("请填写 Yunwu.ai Key 以启用角色识别")
+
+# 自部署 IndexTTS2 配置
+tts_base_url = st.sidebar.text_input(
+    "IndexTTS2 API Base URL",
+    value="https://ffo5lqa2aapiq89w-7860.containerx-gpu.com/",
+    help="填写您的云端实例地址（包含末尾斜杠 / ）"
+)
+tts_api_key = st.sidebar.text_input("IndexTTS2 API Key (若无需认证可留空)", type="password", value="")
+tts_model = st.sidebar.text_input("IndexTTS2 模型名称", value="indextts2", help="常见值：indextts2、IndexTTS-2、tts-1 等，若报错请尝试修改")
+
+if not tts_base_url:
+    st.warning("请在侧边栏输入您的 IndexTTS2 API Base URL")
     st.stop()
 
-client = OpenAI(base_url="https://yunwu.ai/v1", api_key=api_key)
+# LLM 客户端
+if yunwu_api_key:
+    llm_client = OpenAI(base_url="https://yunwu.ai/v1", api_key=yunwu_api_key)
+else:
+    llm_client = None
 
-# LLM 模型选择（包含您要求的所有模型，名称根据常见代理格式填写）
+# TTS 客户端（自部署）
+tts_client = OpenAI(base_url=tts_base_url.rstrip("/"), api_key=tts_api_key or "none")
+
+# LLM 模型选择（仅当有 yunwu key 时启用）
 llm_models = [
-    "gpt-4o",
-    "claude-3-5-sonnet-20240620",
-    "deepseek-chat",
-    "gemini-1.5-pro",
-    "grok-beta",
-    "doubao-lite-32k",  # 豆包轻量版，可根据实际替换
+    "gpt-4o", "claude-3-5-sonnet-20240620", "deepseek-chat",
+    "gemini-1.5-pro", "grok-beta", "doubao-lite-32k"
 ]
 selected_llm = st.sidebar.selectbox("选择用于角色识别的AI模型", llm_models)
-
-# TTS 配置（固定使用 IndexTTS2，如需改为可选可取消注释）
-tts_model = "indextts2"
-
-# 预设声音选项（根据常见中文TTS预设，您可根据实际接口支持的声音名称调整）
-voice_options = [
-    "默认男声", "默认女声", "热情青年男", "温柔少女女",
-    "成熟稳重男", "甜美可爱女", "旁白专用男声", "冷静叙述女声"
-]
 
 # 文件上传
 uploaded_file = st.file_uploader("上传小说TXT文件（分镜内容）", type=["txt"])
@@ -44,6 +52,10 @@ if uploaded_file:
 
     # 自动识别角色
     if st.button("🔍 自动识别角色与分段", type="primary"):
+        if not llm_client:
+            st.error("请先填写 Yunwu.ai API Key")
+            st.stop()
+
         with st.spinner("AI 正在分析文本，识别角色与台词..."):
             prompt = f"""你是一个专业的小说配音脚本分析师。请将以下小说文本分解为顺序的配音段落。
 
@@ -57,7 +69,7 @@ if uploaded_file:
 {text}
 """
             try:
-                response = client.chat.completions.create(
+                response = llm_client.chat.completions.create(
                     model=selected_llm,
                     messages=[
                         {"role": "system", "content": "你必须只输出纯JSON，不要任何说明。"},
@@ -67,84 +79,80 @@ if uploaded_file:
                     max_tokens=4096
                 )
                 content = response.choices[0].message.content.strip()
-                # 清理可能的代码块
                 if content.startswith("```"):
-                    content = content.split("```")[1]
+                    content = content.split("```")[1].strip()
                     if content.startswith("json"):
-                        content = content[4:]
+                        content = content[4:].strip()
                 segments = json.loads(content)
                 st.session_state.segments = segments
                 st.session_state.full_text = text
-                st.success(f"识别完成！共 {len(segments)} 段，检测到角色：{[s['role'] for s in segments if s['role'] != '旁白']}")
+                unique_roles = list(set(s['role'] for s in segments if s['role'] != '旁白'))
+                st.success(f"识别完成！共 {len(segments)} 段，检测到角色：{unique_roles}")
             except Exception as e:
                 st.error(f"识别失败：{e}")
-                st.code(content if 'content' in locals() else "无输出")
 
-# 显示角色设置与生成音频
+# 生成音频
 if 'segments' in st.session_state:
     segments = st.session_state.segments
     roles = list(set(seg["role"] for seg in segments))
 
-    st.header("🎤 角色声音设置")
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        st.write("**角色**")
-    with col2:
-        st.write("**分配声音**")
-
-    voice_map = {}
-    for role in roles:
-        default_idx = 6 if role == "旁白" else 0
-        with col1:
-            st.write(role)
-        with col2:
-            voice_map[role] = st.selectbox(f"声音 - {role}", voice_options, index=default_idx, key=f"voice_{role}")
-
-    st.session_state.voice_map = voice_map
+    st.header("🎤 当前设置：统一使用默认声线（后续可扩展克隆）")
+    st.info("IndexTTS2 零样本克隆能力极强，后续版本可为每个角色上传参考音频实现不同声音")
 
     if st.button("🔊 生成完整配音", type="primary"):
-        with st.spinner("正在调用云端IndexTTS2生成音频（可能需要几分钟）..."):
+        with st.spinner("正在调用您的云端IndexTTS2生成音频（可能需要几分钟）..."):
             audio_segments = []
             progress_bar = st.progress(0)
             for i, seg in enumerate(segments):
-                role = seg["role"]
                 text_seg = seg["text"].strip()
                 if not text_seg:
                     continue
-                voice = st.session_state.voice_map.get(role, voice_options[0])
                 try:
-                    # 调用云端 IndexTTS2（假设支持 OpenAI 风格的 audio/speech）
-                    response = client.audio.speech.create(
+                    # 先尝试带 voice 参数（若支持），否则自动降级为无 voice
+                    response = tts_client.audio.speech.create(
                         model=tts_model,
-                        voice=voice,          # 如果实际参数是 speaker/style 等，请修改
                         input=text_seg,
                         response_format="mp3"
                     )
-                    audio_data = response.content
-                    audio = AudioSegment.from_mp3(io.BytesIO(audio_data))
-                    audio_segments.append(audio)
-                except Exception as e:
-                    st.error(f"第 {i+1} 段（{role}）生成失败：{e}")
+                    # 如果上面报错缺少 voice，可取消注释下面这行尝试添加默认 voice
+                    # voice="default"  # 若支持可尝试 "male", "female", "zh-CN" 等
+                except Exception as e1:
+                    st.warning(f"第 {i+1} 段尝试带 voice 失败，自动降级无参数调用：{e1}")
+                    try:
+                        response = tts_client.audio.speech.create(
+                            model=tts_model,
+                            input=text_seg,
+                            response_format="mp3"
+                        )
+                    except Exception as e2:
+                        st.error(f"第 {i+1} 段（{seg['role']}）生成失败：{e2}")
+                        continue
+
+                audio_data = response.content
+                audio = AudioSegment.from_mp3(io.BytesIO(audio_data))
+                audio_segments.append(audio)
                 progress_bar.progress((i + 1) / len(segments))
 
             if audio_segments:
-                # 合并所有音频段
                 combined = AudioSegment.empty()
                 for seg in audio_segments:
                     combined += seg
-                # 保存并提供预览/下载
                 output_bytes = io.BytesIO()
                 combined.export(output_bytes, format="mp3")
                 output_bytes.seek(0)
+
                 st.audio(output_bytes, format="audio/mp3")
                 st.download_button(
                     label="📥 下载完整配音MP3",
                     data=output_bytes,
-                    file_name="AI配音结果.mp3",
+                    file_name="AI配音_IndexTTS2.mp3",
                     mime="audio/mp3"
                 )
                 st.success("配音生成完成！")
             else:
-                st.error("所有段落生成失败，请检查API或声音参数")
+                st.error("所有段落生成失败，请检查 API 地址或模型名称")
 
-st.info("提示：如果TTS声音参数与实际接口不符（如需使用speaker_id、emotion等），请修改 client.audio.speech.create 中的参数。")
+st.info("""
+部署步骤同之前（GitHub + requirements.txt：streamlit, openai, pydub）。
+首次运行建议用短文本测试。如果出现具体错误（如 404、参数错误、认证失败），请截图错误信息发我，我可以精准调整（例如添加 voice、emotion、reference_audio 等参数）。
+""")
