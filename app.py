@@ -1,250 +1,245 @@
 import streamlit as st
-import openai
 import json
 import requests
-import os
-import tempfile
-import time
+import pandas as pd
+from openai import OpenAI
 
-# --- 页面全局配置 ---
-st.set_page_config(page_title="IndexTTS 高级配音工作台", layout="wide")
+# ==========================================
+# 1. 基础配置
+# ==========================================
+st.set_page_config(layout="wide", page_title="IndexTTS 专业配音台")
 
-# --- CSS 样式优化：让界面更像原生应用 ---
-st.markdown("""
-<style>
-    /* 角色卡片样式 */
-    .role-container {
-        background-color: #2b2b2b;
-        padding: 20px;
-        border-radius: 10px;
-        border: 1px solid #444;
-        margin-bottom: 20px;
-    }
-    .role-header {
-        font-size: 20px;
-        font-weight: bold;
-        color: #fff;
-        margin-bottom: 10px;
-        border-bottom: 1px solid #555;
-        padding-bottom: 5px;
-    }
-    /* 模拟截图中的深色背景输入框 */
-    .stTextInput input {
-        background-color: #1e1e1e;
-        color: #e0e0e0;
-        border: 1px solid #555;
-    }
-    /* 滑块样式微调 */
-    .stSlider > div > div > div > div {
-        background-color: #7c4dff;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# --- Session State 初始化 ---
 if 'script_data' not in st.session_state:
-    st.session_state.script_data = []
+    st.session_state.script_data = None
 if 'roles' not in st.session_state:
-    st.session_state.roles = set()
-if 'role_settings' not in st.session_state:
-    st.session_state.role_settings = {} # 存储每个角色的详细配置
+    st.session_state.roles = []
+# 用于存储每个角色的详细配置
+if 'role_configs' not in st.session_state:
+    st.session_state.role_configs = {}
 
-# ================= 侧边栏配置 =================
-st.sidebar.title("🛠️ 系统设置")
+# ==========================================
+# 2. 功能函数
+# ==========================================
 
-with st.sidebar.expander("1. 模型接口 (LLM)", expanded=False):
-    llm_base_url = st.text_input("Base URL", value="https://yunwu.ai/v1/")
-    llm_api_key = st.text_input("API Key", type="password")
-    model_options = ["deepseek-chat", "gpt-4o", "claude-3-5-sonnet", "gemini-1.5-pro"]
-    selected_model = st.selectbox("选择模型", model_options + ["自定义"])
-    if selected_model == "自定义":
-        selected_model = st.text_input("输入模型名称")
-
-with st.sidebar.expander("2. IndexTTS 接口设置", expanded=True):
-    tts_api_url = st.text_input("API 地址", value="http://127.0.0.1:9880/tts_advanced")
-    st.caption("注：此接口需支持接收 emotion_vector 和 ref_audio_path 参数")
-
-# ================= 核心函数 =================
-
-def parse_script_with_ai(text):
-    """AI 角色识别"""
-    if not llm_api_key:
-        st.error("请先设置 API Key")
-        return None
-    
-    client = openai.OpenAI(api_key=llm_api_key, base_url=llm_base_url)
-    prompt = """
-    分析剧本，提取角色和台词。
-    格式：JSON 数组 [{"role": "角色名", "text": "台词内容"}]
-    如果是旁白，role 填 "旁白"。
-    只返回 JSON，无Markdown。
+def call_custom_tts_api(api_url, text, config):
     """
-    try:
-        with st.spinner("正在分析剧本..."):
-            resp = client.chat.completions.create(
-                model=selected_model,
-                messages=[{"role": "system", "content": prompt}, {"role": "user", "content": text}],
-                temperature=0.1
-            )
-            return json.loads(resp.choices[0].message.content.replace("```json","").replace("```",""))
-    except Exception as e:
-        st.error(f"解析失败: {e}")
-        return None
+    发送包含克隆参数的复杂请求
+    config: 包含 ref_audio_path, emotion_mode, vectors 等的字典
+    """
+    if not api_url:
+        return None, "未配置 API 地址"
 
-def generate_audio_advanced(api_url, text, settings, output_path):
-    """
-    调用支持高级参数的 TTS 接口
-    settings: 包含 ref_audio_path, emotion_mode, emotion_vector 等字典
-    """
-    # 构建符合截图逻辑的 Payload
+    # 构建 Payload (根据常见的 GPT-SoVITS/IndexTTS API 格式构建，可能需要根据你的实际后端微调)
+    # 包含了图片中的需求：参考音频、情感模式、情感向量
     payload = {
         "text": text,
-        "ref_audio_path": settings.get("ref_audio_path", ""),
-        "emotion_control": settings.get("emotion_mode", "使用情感向量"),
-        "format": "mp3"
+        "text_lang": "zh",
+        
+        # 1. 参考音频 (如果是路径模式)
+        "ref_audio_path": config.get("ref_audio_path", ""),
+        
+        # 2. 情感控制模式
+        "emotion_mode": config.get("emotion_mode", "same_as_ref"),
+        
+        # 3. 情感向量 (只有在选择了向量模式时才生效)
+        "emotion_vector": config.get("vectors", {}),
+        
+        # 其他通用参数
+        "speed": 1.0,
+        "top_k": 5,
+        "top_p": 1.0,
+        "temperature": 1.0
     }
+
+    # 如果有上传的文件实体（不仅仅是路径），通常需要用 multipart/form-data 发送
+    # 这里为了演示通用性，我们假设后端接受 JSON 路径或者 base64，
+    # 或者如果是在本地跑，Streamlit可以通过路径传递。
+    # 简单起见，这里演示 JSON 传递参数的方式。
     
-    # 只有选择了“使用情感向量”才发送具体的数值
-    if settings.get("emotion_mode") == "使用情感向量":
-        payload["emotion_vector"] = {
-            "happy": settings.get("happy", 0.0),
-            "angry": settings.get("angry", 0.0),
-            "sad": settings.get("sad", 0.0),
-            "fear": settings.get("fear", 0.0),
-            "disgust": settings.get("disgust", 0.0),
-            "surprise": settings.get("surprise", 0.0),
-        }
-
     try:
-        resp = requests.post(api_url, json=payload, timeout=60)
-        if resp.status_code == 200:
-            with open(output_path, "wb") as f:
-                f.write(resp.content)
-            return True
+        # 调试：打印发送的数据（开发者看）
+        # print("Sending payload:", payload) 
+        
+        response = requests.post(api_url, json=payload, timeout=120)
+        
+        if response.status_code == 200:
+            return response.content, None
         else:
-            print(f"Error: {resp.text}")
-            return False
+            return None, f"API 报错 ({response.status_code}): {response.text}"
     except Exception as e:
-        print(f"Request Error: {e}")
-        return False
+        return None, f"网络请求失败: {str(e)}"
 
-# ================= 主界面逻辑 =================
+def analyze_script(text, api_key, model):
+    """LLM 角色拆分逻辑"""
+    client = OpenAI(api_key=api_key, base_url="https://yunwu.ai/v1")
+    prompt = f"""
+    请将小说拆分为[{{"role": "角色", "text": "对白"}}]的JSON列表。
+    只输出JSON，无Markdown。
+    文本：{text[:3000]}
+    """
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"}
+        )
+        return json.loads(resp.choices[0].message.content.replace("```json", "").replace("```", ""))
+    except Exception as e:
+        if isinstance(e, dict) and 'script' in e: return e['script'] # 容错
+        st.error(f"LLM分析错: {e}")
+        return []
 
-st.title("🎛️ AI 剧本配音 - 高级控制版")
-
-# --- 第一步：上传与识别 ---
-uploaded_file = st.file_uploader("1. 上传剧本 (TXT)", type="txt")
-if uploaded_file and st.button("开始角色分析"):
-    text = uploaded_file.getvalue().decode("utf-8")
-    result = parse_script_with_ai(text)
-    if result:
-        st.session_state.script_data = result
-        st.session_state.roles = sorted(list(set(r['role'] for r in result)))
-        st.success(f"识别到 {len(st.session_state.roles)} 个角色")
-
-# --- 第二步：高级角色配置（复刻截图界面）---
-if st.session_state.roles:
+# ==========================================
+# 3. 侧边栏设置
+# ==========================================
+with st.sidebar:
+    st.header("⚙️ 全局配置")
+    yunwu_key = st.text_input("Yunwu API Key", type="password")
+    llm_model = st.selectbox("分角模型", ["deepseek-chat", "gpt-4o", "claude-3-5-sonnet", "doubao-pro-32k"])
+    
     st.divider()
-    st.header("2. 角色音色与情感配置")
-    st.info("在此处配置每个角色的参考音频和情感参数，设置将应用于该角色的所有台词。")
+    
+    st.subheader("🔊 TTS 接口设置")
+    tts_url = st.text_input("API 地址", value="http://127.0.0.1:9880/tts_endpoint",help="指向你部署的 IndexTTS/GPT-SoVITS 推理接口")
+    
+    st.info("提示：图片中的功能需要后端 API 支持接收 `emotion_vector` 和 `ref_audio` 参数。")
+    
+    st.divider()
+    txt_file = st.file_uploader("导入剧本 TXT", type="txt")
 
-    # 为每个角色创建一个配置面板
-    for role in st.session_state.roles:
-        # 初始化该角色的默认设置
-        if role not in st.session_state.role_settings:
-            st.session_state.role_settings[role] = {
-                "ref_audio_path": "",
-                "emotion_mode": "使用情感向量",
-                "happy": 0.0, "angry": 0.0, "sad": 0.0, 
-                "fear": 0.0, "disgust": 0.0, "surprise": 0.0
-            }
+# ==========================================
+# 4. 主界面
+# ==========================================
+st.title("🎛️ IndexTTS 深度克隆配音台")
+
+# --- 步骤1：文本分析 ---
+if txt_file and yunwu_key:
+    if st.button("🚀 1. 拆分角色与对白"):
+        raw_text = txt_file.getvalue().decode("utf-8")
+        res = analyze_script(raw_text, yunwu_key, llm_model)
         
-        settings = st.session_state.role_settings[role]
-
-        with st.expander(f"👤 {role} 配置面板", expanded=False):
-            # 布局：左侧参考音频，右侧情感控制
-            c1, c2 = st.columns([2, 1])
+        # 兼容处理返回格式
+        final_list = []
+        if isinstance(res, dict):
+            # 尝试找 list 类型的 value
+            for v in res.values():
+                if isinstance(v, list): final_list = v; break
+        elif isinstance(res, list):
+            final_list = res
             
-            with c1:
-                st.markdown("**参考音频 (Reference Audio)**")
-                # 选项 1：输入服务器路径 (截图风格)
-                path_val = st.text_input(
-                    f"本地路径 (如 I:/F5tts/{role}.wav)", 
-                    value=settings["ref_audio_path"],
-                    key=f"path_{role}"
-                )
-                
-                # 选项 2：上传文件 (适合 Streamlit Cloud)
-                uploaded_ref = st.file_uploader(f"或上传音频文件 ({role})", type=["wav", "mp3"], key=f"up_{role}")
-                
-                # 逻辑：如果有上传，优先使用上传的临时路径，否则使用输入的路径
-                if uploaded_ref:
-                    # 保存临时文件获取路径
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-                        tmp.write(uploaded_ref.getvalue())
-                        settings["ref_audio_path"] = tmp.name
-                else:
-                    settings["ref_audio_path"] = path_val
+        if final_list:
+            st.session_state.script_data = final_list
+            st.session_state.roles = list(set([x['role'] for x in final_list]))
+            st.success(f"成功识别 {len(st.session_state.roles)} 个角色！")
+        else:
+            st.error("未能识别出有效的分镜数据，请检查 LLM 返回。")
 
-            with c2:
-                st.markdown("**情感控制 (Emotion Control)**")
-                mode = st.selectbox(
+# --- 步骤2：复杂角色配置 (仿图片UI) ---
+if st.session_state.script_data:
+    col_config, col_preview = st.columns([1.2, 1.8], gap="large")
+    
+    with col_config:
+        st.subheader("🎚️ 角色音色克隆面板")
+        st.markdown("在这里为每个角色配置独立的参考音频和情感。")
+        
+        # 遍历所有角色，生成配置卡片
+        for role in st.session_state.roles:
+            # 使用 expander 模拟卡片效果
+            with st.expander(f"👤 设置：{role}", expanded=False):
+                
+                # 初始化该角色的配置字典
+                if role not in st.session_state.role_configs:
+                    st.session_state.role_configs[role] = {}
+                
+                # 1. 参考音频设置 (模仿图片中的 "参考音频")
+                st.markdown("#### 1. 参考音频 (Reference)")
+                # 方式A: 输入服务器上的绝对路径 (适合本地部署)
+                ref_path = st.text_input("参考音频路径 (.wav)", 
+                                       value=f"D:/models/ref_audio/{role}.wav", 
+                                       key=f"path_{role}",
+                                       help="填入运行 TTS 那个电脑上的文件绝对路径")
+                
+                # 方式B: 直接上传 (适合云端, 需要后端支持文件接收)
+                # uploaded_ref = st.file_uploader("或上传音频文件", type=["wav", "mp3"], key=f"file_{role}")
+                
+                st.session_state.role_configs[role]['ref_audio_path'] = ref_path
+
+                st.divider()
+
+                # 2. 情感控制 (模仿图片中的 "情感控制")
+                st.markdown("#### 2. 情感控制 (Emotion)")
+                emotion_mode = st.selectbox(
                     "控制模式", 
-                    ["与语音参考相同", "使用情感参考音频", "使用情感向量", "使用文本描述"],
-                    index=2, # 默认选中 "使用情感向量"
-                    key=f"mode_{role}"
+                    options=["与参考音频相同", "使用情感向量", "使用文本描述"],
+                    key=f"emm_{role}"
                 )
-                settings["emotion_mode"] = mode
+                st.session_state.role_configs[role]['emotion_mode'] = emotion_mode
 
-            # --- 情感向量滑块 (仅当选择“使用情感向量”时显示) ---
-            if mode == "使用情感向量":
-                st.markdown("---")
-                st.markdown("**情感向量调节 (Emotion Vectors)**")
-                
-                # 使用多列布局复刻截图的排列
-                ec1, ec2, ec3 = st.columns(3)
-                
-                with ec1:
-                    settings["happy"] = st.slider("快乐 (Happy)", 0.0, 1.0, settings["happy"], 0.1, key=f"happy_{role}")
-                    settings["fear"] = st.slider("恐惧 (Fear)", 0.0, 1.0, settings["fear"], 0.1, key=f"fear_{role}")
-                with ec2:
-                    settings["angry"] = st.slider("愤怒 (Angry)", 0.0, 1.0, settings["angry"], 0.1, key=f"angry_{role}")
-                    settings["disgust"] = st.slider("厌恶 (Disgust)", 0.0, 1.0, settings["disgust"], 0.1, key=f"disgust_{role}")
-                with ec3:
-                    settings["sad"] = st.slider("悲伤 (Sad)", 0.0, 1.0, settings["sad"], 0.1, key=f"sad_{role}")
-                    settings["surprise"] = st.slider("惊讶 (Surprise)", 0.0, 1.0, settings["surprise"], 0.1, key=f"surprise_{role}")
+                # 3. 情感向量滑块 (只有选中"使用情感向量"才显示，模仿图片下方的滑块)
+                if emotion_mode == "使用情感向量":
+                    st.caption("调整各维度的情感权重 (0.0 - 1.0)")
+                    c1, c2 = st.columns(2)
+                    
+                    vectors = {}
+                    with c1:
+                        vectors['happy'] = st.slider("快乐 (Happy)", 0.0, 1.0, 0.0, 0.1, key=f"hap_{role}")
+                        vectors['angry'] = st.slider("愤怒 (Angry)", 0.0, 1.0, 0.0, 0.1, key=f"ang_{role}")
+                        vectors['sad'] = st.slider("悲伤 (Sad)", 0.0, 1.0, 0.0, 0.1, key=f"sad_{role}")
+                    with c2:
+                        vectors['fear'] = st.slider("恐惧 (Fear)", 0.0, 1.0, 0.0, 0.1, key=f"fea_{role}")
+                        vectors['disgust'] = st.slider("厌恶 (Disgust)", 0.0, 1.0, 0.0, 0.1, key=f"dis_{role}")
+                        vectors['depressed'] = st.slider("忧郁 (Depressed)", 0.0, 1.0, 0.0, 0.1, key=f"dep_{role}")
+                    
+                    st.session_state.role_configs[role]['vectors'] = vectors
 
-    # --- 第三步：生成 ---
-    st.divider()
-    if st.button("🚀 开始批量合成", type="primary"):
-        st.write("正在根据上述高级配置生成音频...")
+    # --- 步骤3：右侧预览与合成 ---
+    with col_preview:
+        st.subheader("▶️ 分镜合成预览")
         
-        progress = st.progress(0)
-        results = []
-        total = len(st.session_state.script_data)
-        temp_dir = tempfile.mkdtemp()
+        # 批量合成按钮
+        if st.button("🎵 合成页面所有台词", type="primary"):
+            st.toast("正在发送批量请求...")
 
-        for i, line in enumerate(st.session_state.script_data):
-            role = line['role']
-            text = line['text']
-            
-            # 获取该角色的特定配置
-            role_config = st.session_state.role_settings.get(role, {})
-            
-            file_name = f"{i}_{role}.mp3"
-            out_path = os.path.join(temp_dir, file_name)
-            
-            # 调用接口
-            success = generate_audio_advanced(tts_api_url, text, role_config, out_path)
-            
-            if success:
-                results.append({"role": role, "text": text, "file": out_path})
-            
-            progress.progress((i + 1) / total)
-            time.sleep(0.1)
+        script_container = st.container(height=800)
+        with script_container:
+            for idx, item in enumerate(st.session_state.script_data):
+                role = item['role']
+                text = item['text']
+                
+                # 不同角色不同背景色
+                bg_color = "#f4f4f4" if role == "旁白" else "#e1f5fe"
+                border_color = "#999" if role == "旁白" else "#0288d1"
+                
+                st.markdown(
+                    f"""
+                    <div style="
+                        background-color: {bg_color}; 
+                        border-left: 5px solid {border_color};
+                        padding: 12px; 
+                        border-radius: 4px; 
+                        margin-bottom: 8px;">
+                        <span style="font-weight:bold; color:{border_color}">{role}</span>
+                        <div style="margin-top:4px; font-size:16px;">{text}</div>
+                    </div>
+                    """, 
+                    unsafe_allow_html=True
+                )
 
-        st.success("合成完毕！")
-        for res in results:
-            with st.chat_message(name=res['role']):
-                st.write(res['text'])
-                st.audio(res['file'])
+                col_act, col_info = st.columns([1, 4])
+                
+                # 生成按钮
+                if col_act.button("🔊 生成", key=f"gen_{idx}"):
+                    # 获取当前角色的最新配置
+                    current_config = st.session_state.role_configs.get(role, {})
+                    
+                    with st.spinner(f"正在以【{role}】的参数合成..."):
+                        audio_data, err = call_custom_tts_api(tts_url, text, current_config)
+                        
+                        if audio_data:
+                            st.audio(audio_data, format="audio/wav")
+                        else:
+                            st.error(err)
+                            st.json(current_config) # 出错时显示当前用的配置方便调试
+
+else:
+    st.info("👈 请先在左侧上传剧本文件")
