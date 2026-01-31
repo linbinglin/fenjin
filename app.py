@@ -34,9 +34,38 @@ if yunwu_api_key:
 else:
     llm_client = None
 
+# ==================== TTS Voice 参数设置（关键修复） ====================
+st.sidebar.header("TTS Voice 参数设置（必须填写）")
+st.sidebar.info("您的实例要求 voice 参数，请填写本地软件能成功的 voice 值")
+
+common_voices = [
+    "default", "male", "female",
+    "zh_male", "zh_female",
+    "Xiaoxiao", "Yunxi", "Yunjian",
+    "male_qn", "female_qn"
+]
+
+selected_voice_preset = st.sidebar.selectbox("① 快速尝试常见voice", ["（不选）"] + common_voices, index=0)
+
+custom_voice = st.sidebar.text_input(
+    "② voice 参数（自主填写，以此为准）",
+    value=selected_voice_preset if selected_voice_preset != "（不选）" else "",
+    placeholder="例如：default / male / Xiaoxiao / 您本地软件成功的voice"
+)
+
+final_voice = custom_voice.strip()
+if not final_voice and selected_voice_preset != "（不选）":
+    final_voice = selected_voice_preset
+
+if not final_voice:
+    st.sidebar.error("必须选择或填写 voice 参数！")
+    st.stop()
+
+st.sidebar.success(f"当前使用 voice：**{final_voice}**")
+
 # ==================== 角色识别模型选择 ====================
 st.sidebar.header("角色识别模型设置")
-st.sidebar.info("推荐使用 yunwu.ai 稳定模型：gpt-4o、claude-3-5-sonnet-20240620、gemini-1.5-pro")
+st.sidebar.info("推荐稳定模型：gpt-4o、claude-3-5-sonnet-20240620、gemini-1.5-pro")
 
 common_models = [
     "gpt-4o", "gpt-4o-mini",
@@ -78,11 +107,11 @@ if uploaded_file:
 
 要求：
 1. 每段只能是“旁白”（叙述文字）或某个角色的台词。
-2. 自动识别所有出现的角色名（角色名要准确、一致）。
+2. 自动识别所有出现的角色名（保持一致）。
 3. 输出严格为完整的JSON数组，格式：[ {{"role": "角色名或旁白", "text": "该段完整文字"}} ]
-4. text字段中的双引号必须转义为 \\"，确保JSON合法。
+4. text字段中的双引号必须转义为 \\"
 5. 覆盖全部文本，绝不能截断。
-6. 只输出纯JSON，不要任何说明、代码块或额外文字。
+6. 只输出纯JSON。
 
 小说文本：
 {text}
@@ -92,7 +121,7 @@ if uploaded_file:
                 response = llm_client.chat.completions.create(
                     model=final_model,
                     messages=[
-                        {"role": "system", "content": "你必须只输出完整的合法JSON数组，不能有任何多余字符。"},
+                        {"role": "system", "content": "你必须只输出完整的合法JSON数组。"},
                         {"role": "user", "content": prompt}
                     ],
                     temperature=0.2,
@@ -100,30 +129,24 @@ if uploaded_file:
                 )
                 content = response.choices[0].message.content.strip()
 
-                # 增强清理
                 if content.startswith("```"):
                     content = content.split("```")[1].strip()
                     if content.lower().startswith("json"):
                         content = content[4:].strip()
 
-                # 尝试直接解析
                 try:
                     segments = json.loads(content)
                 except json.JSONDecodeError as e:
-                    st.warning(f"JSON解析失败，尝试自动修复：{e}")
-                    # 常见修复：补全括号、修复未闭合引号
-                    content = re.sub(r',\s*]', ']', content)  # 去掉末尾多余逗号
-                    content = re.sub(r'"\s*$', '"', content, flags=re.MULTILINE)  # 尝试闭合未结束的字符串
+                    st.warning(f"JSON解析失败，尝试修复：{e}")
+                    content = re.sub(r',\s*]', ']', content)
                     content = content.strip()
-                    if not content.endswith(']'):
-                        content += ']'
-                    if not content.startswith('['):
-                        content = '[' + content
+                    if not content.endswith(']'): content += ']'
+                    if not content.startswith('['): content = '[' + content
                     try:
                         segments = json.loads(content)
                         st.info("自动修复成功")
-                    except Exception as e2:
-                        st.error(f"修复后仍失败：{e2}")
+                    except:
+                        st.error("修复失败")
                         st.code(content)
                         st.stop()
 
@@ -139,8 +162,8 @@ if 'segments' in st.session_state:
     segments = st.session_state.segments
     tts_client = OpenAI(base_url=tts_base_url.rstrip("/"), api_key=tts_api_key or "none")
 
-    st.header("🎤 当前设置：统一使用默认声线")
-    st.info("IndexTTS2 零样本克隆能力极强，后续可扩展参考音频实现多角色不同声音")
+    st.header("🎤 当前设置：统一使用同一voice（所有角色+旁白）")
+    st.info("IndexTTS2 支持声线克隆，后续可为每个角色上传参考音频实现不同声音")
 
     if st.button("🔊 生成完整配音", type="primary"):
         with st.spinner("正在调用云端IndexTTS2生成并合并音频..."):
@@ -153,6 +176,7 @@ if 'segments' in st.session_state:
                 try:
                     response = tts_client.audio.speech.create(
                         model=tts_model,
+                        voice=final_voice,  # 关键：添加voice参数
                         input=text_seg,
                         response_format="mp3"
                     )
@@ -162,7 +186,7 @@ if 'segments' in st.session_state:
                 progress_bar.progress((i + 1) / len(segments))
 
             if not audio_bytes_list:
-                st.error("所有段落生成失败")
+                st.error("所有段落生成失败，请检查 voice 参数是否正确")
                 st.stop()
 
             # ffmpeg 合并
@@ -201,6 +225,12 @@ if 'segments' in st.session_state:
                 file_name="AI配音_IndexTTS2.mp3",
                 mime="audio/mp3"
             )
-            st.success("配音生成完成！")
+            st.success("配音生成并合并完成！")
 
-st.info("建议：首次测试请用极短文本（几百字）。如果仍报错，请截图完整错误和原始输出内容。")
+st.info("""
+部署要求：
+- requirements.txt：streamlit\nopenai
+- packages.txt：ffmpeg
+建议：先用极短文本（1-2句）测试配音，找到正确的 voice 值后再处理长文。
+如果还有报错（比如 voice 不支持），请把错误截图发我，我继续帮您调。
+""")
