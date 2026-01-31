@@ -9,7 +9,7 @@ import tempfile
 st.set_page_config(page_title="AI小说配音工具", layout="wide")
 st.title("AI小说配音程序（自部署云端IndexTTS2）")
 
-# 侧边栏配置
+# ==================== 侧边栏配置 ====================
 st.sidebar.header("API 配置")
 
 # Yunwu.ai 用于角色识别
@@ -36,23 +36,57 @@ if yunwu_api_key:
 else:
     llm_client = None
 
-# TTS 客户端（自部署）
-tts_client = OpenAI(base_url=tts_base_url.rstrip("/"), api_key=tts_api_key or "none")
+# ==================== 角色识别模型选择（支持自主填写） ====================
+st.sidebar.header("角色识别模型设置")
 
-# LLM 模型选择
-llm_models = [
-    "gpt-4o", "claude-3-5-sonnet-20240620", "deepseek-chat",
-    "gemini-1.5-pro", "grok-beta", "doubao-lite-32k"
+# 常用模型列表
+common_models = [
+    "gpt-4o",
+    "gpt-4o-mini",
+    "claude-3-5-sonnet-20240620",
+    "claude-3-5-sonnet-20241022",
+    "deepseek-chat",
+    "deepseek-reasoner",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash",
+    "grok-beta",
+    "doubao-lite-32k",
+    "qwen-max",
+    "qwen2.5-72b-instruct",
+    # 可继续补充 yunwu.ai 支持的模型
 ]
-selected_llm = st.sidebar.selectbox("选择用于角色识别的AI模型", llm_models)
 
-# 文件上传
+selected_preset = st.sidebar.selectbox(
+    "① 快速选择常用模型",
+    ["（不选）"] + common_models,
+    index=0,
+    help="选择后会自动填入下方输入框"
+)
+
+custom_model = st.sidebar.text_input(
+    "② 模型名称（自主填写，以此为准）",
+    value=selected_preset if selected_preset != "（不选）" else "",
+    placeholder="例如：gpt-4o / claude-3-5-sonnet-20241022 / 任意模型ID",
+    help="此处填写的内容将直接作为 model 参数传给 API，优先级最高"
+)
+
+# 最终模型名称逻辑
+final_model = custom_model.strip()
+if not final_model and selected_preset != "（不选）":
+    final_model = selected_preset
+
+if not final_model:
+    st.sidebar.error("必须选择或填写一个角色识别模型名称")
+    st.stop()
+
+st.sidebar.success(f"当前使用模型：**{final_model}**")
+
+# ==================== 文件上传与角色识别 ====================
 uploaded_file = st.file_uploader("上传小说TXT文件（分镜内容）", type=["txt"])
 if uploaded_file:
     text = uploaded_file.read().decode("utf-8")
     st.text_area("小说全文预览", text, height=300)
 
-    # 自动识别角色
     if st.button("🔍 自动识别角色与分段", type="primary"):
         if not llm_client:
             st.error("请先填写 Yunwu.ai API Key")
@@ -72,7 +106,7 @@ if uploaded_file:
 """
             try:
                 response = llm_client.chat.completions.create(
-                    model=selected_llm,
+                    model=final_model,  # 使用最终确定的模型
                     messages=[
                         {"role": "system", "content": "你必须只输出纯JSON，不要任何说明。"},
                         {"role": "user", "content": prompt}
@@ -92,13 +126,18 @@ if uploaded_file:
                 st.success(f"识别完成！共 {len(segments)} 段，检测到角色：{unique_roles}")
             except Exception as e:
                 st.error(f"识别失败：{e}")
+                if 'content' in locals():
+                    st.code(content)
 
-# 生成音频
+# ==================== 生成音频 ====================
 if 'segments' in st.session_state:
     segments = st.session_state.segments
 
     st.header("🎤 当前设置：统一使用默认声线（后续可扩展克隆）")
     st.info("IndexTTS2 零样本克隆能力极强，后续可为每个角色上传参考音频实现不同声音")
+
+    # TTS 客户端
+    tts_client = OpenAI(base_url=tts_base_url.rstrip("/"), api_key=tts_api_key or "none")
 
     if st.button("🔊 生成完整配音", type="primary"):
         with st.spinner("正在调用您的云端IndexTTS2生成并合并音频..."):
@@ -123,7 +162,7 @@ if 'segments' in st.session_state:
                 st.error("所有段落生成失败")
                 st.stop()
 
-            # 使用 ffmpeg 合并（不依赖 pydub）
+            # 使用 ffmpeg 合并
             with tempfile.TemporaryDirectory() as tmpdir:
                 input_paths = []
                 for idx, audio_bytes in enumerate(audio_bytes_list):
@@ -138,13 +177,12 @@ if 'segments' in st.session_state:
                         f.write(f"file '{p}'\n")
 
                 output_path = os.path.join(tmpdir, "output.mp3")
-                # 先尝试直接 copy（最快），失败则重新编码
                 result = subprocess.run([
                     "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path,
                     "-c", "copy", output_path
                 ], capture_output=True)
                 if result.returncode != 0:
-                    st.warning("直接合并失败，自动切换为重新编码合并")
+                    st.warning("直接合并失败，自动重新编码")
                     subprocess.run([
                         "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path,
                         "-c:a", "libmp3lame", output_path
@@ -163,4 +201,9 @@ if 'segments' in st.session_state:
             )
             st.success("配音生成并合并完成！")
 
-st.info("部署后若仍有问题，请截图最新错误。建议先用极短文本（1-2句）测试，确保TTS接口正常返回音频。")
+st.info("""
+部署要求：
+- requirements.txt：streamlit\nopenai
+- packages.txt：ffmpeg
+首次运行建议用极短文本（1-2句）测试。如有新错误请截图发我。
+""")
