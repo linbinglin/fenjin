@@ -4,220 +4,165 @@ import requests
 from openai import OpenAI
 
 # ==========================================
-# 1. 页面配置
+# 1. 基础配置
 # ==========================================
-st.set_page_config(layout="wide", page_title="AI 配音工作台 (智能修复版)")
+st.set_page_config(layout="wide", page_title="AI 配音台 (终极兼容版)")
 
-# 初始化 Session State
+# 初始化
 if 'script_data' not in st.session_state: st.session_state.script_data = None
 if 'roles' not in st.session_state: st.session_state.roles = []
 if 'role_configs' not in st.session_state: st.session_state.role_configs = {}
-# 新增状态：存储探测到的正确API完整地址
-if 'verified_api_url' not in st.session_state: st.session_state.verified_api_url = ""
 
 # ==========================================
-# 2. 核心逻辑：智能接口探测
+# 2. 核心 API 调用逻辑 (增加 GET/POST 切换)
 # ==========================================
-def probe_api_url(base_url):
+def call_indextts_api(full_url, text, config, method="POST"):
     """
-    自动探测正确的 API 后缀
+    终极版调用函数: 支持 GET 和 POST 两种模式
     """
-    # 去掉末尾斜杠
-    base_url = base_url.rstrip("/")
-    
-    # 常见的 IndexTTS / GPT-SoVITS 接口后缀
-    endpoints = [
-        "",              # 尝试直接请求 (有些API就是根目录)
-        "/tts",          # 最常见的
-        "/inference",    # 常见变体
-        "/v1/inference", # 规范化接口
-        "/api/generate"  # 也是常见的一种
-    ]
-    
-    # 构造一个极简的测试 Payload
-    test_payload = {
-        "text": "测试",
-        "text_lang": "zh", 
-        "ref_audio_path": "dummy.wav",
-        "prompt_text": "测试",
-        "prompt_lang": "zh"
-    }
+    if not full_url: return None, "请在侧边栏填写完整API地址"
 
-    log_msg = []
-    
-    for endpoint in endpoints:
-        full_url = f"{base_url}{endpoint}"
-        try:
-            # 尝试发送 POST 请求，超时设置短一点
-            resp = requests.post(full_url, json=test_payload, timeout=3)
-            
-            # 如果状态码是 200 (成功) 或 400/422 (参数错误但路径对了)
-            # 说明这个接口是通的，不是 404 也不是 405
-            if resp.status_code == 200:
-                return True, full_url, f"✅ 成功连接到: {full_url}"
-            elif resp.status_code in [400, 422, 500]:
-                # 虽然报错但说明服务器接收了请求，只是参数不对，说明路径是对的
-                return True, full_url, f"✅ 发现接口(参数待调整): {full_url}"
-            else:
-                log_msg.append(f"❌ {full_url} 返回 {resp.status_code}")
-                
-        except Exception as e:
-            log_msg.append(f"❌ {full_url} 连接超时或失败")
-            
-    return False, None, "\n".join(log_msg)
-
-# ==========================================
-# 3. 业务逻辑函数
-# ==========================================
-def analyze_script_llm(text, api_key, model_id):
-    client = OpenAI(api_key=api_key, base_url="https://yunwu.ai/v1")
-    prompt = f"拆分小说为JSON列表:[{{'role':'角色','text':'对白'}}]. 无Markdown. 文本:{text[:2000]}"
-    try:
-        resp = client.chat.completions.create(
-            model=model_id, messages=[{"role":"user","content":prompt}], temperature=0.1
-        )
-        return json.loads(resp.choices[0].message.content.replace("```json","").replace("```",""))
-    except Exception as e: return f"Error: {e}"
-
-def call_indextts_api(real_url, text, config):
-    if not real_url: return None, "请先在侧边栏点击[测试连接]获取正确地址"
-    
-    # 构建请求
-    # 这里处理最棘手的部分：上传文件 vs 路径
-    
-    # 如果后端是标准的 IndexTTS/GPT-SoVITS 容器，通常接收 JSON
-    # 我们需要将 config 里的参数转为后端需要的格式
-    
-    # 构造 multipart/form-data
-    files = {}
-    data = {
+    # 准备参数
+    params = {
         "text": text,
         "text_lang": "zh",
         "speed": 1.0,
         "emotion_mode": config.get("emotion_mode", "same_as_ref")
     }
     
-    # 处理向量
+    # 将情感向量转为 JSON 字符串 (如果是 GET 请求，列表/字典必须转字符串)
     if config.get("vectors"):
-        data["emotion_vector"] = json.dumps(config.get("vectors"))
-
-    # 处理音频源
-    up_file = config.get("uploaded_file")
+        params["emotion_vector"] = json.dumps(config.get("vectors"))
+    
+    # 路径参数
     ref_path = config.get("ref_audio_path")
+    if ref_path: params["ref_audio_path"] = ref_path
 
-    if up_file:
-        up_file.seek(0)
-        # 关键：字段名通常是 'ref_audio'
-        files = {'ref_audio': (up_file.name, up_file, 'audio/wav')}
-    elif ref_path:
-        data['ref_audio_path'] = ref_path
-        
+    # 文件处理
+    files = {}
+    uploaded_file = config.get("uploaded_file")
+    if uploaded_file:
+        uploaded_file.seek(0)
+        files = {'ref_audio': (uploaded_file.name, uploaded_file, 'audio/wav')}
+        # 如果是 GET 模式但上传了文件，这通常是不支持的，只能尝试转为 POST
+        if method == "GET": 
+            return None, "❌ 错误：上传文件模式必须使用 POST 请求，请在侧边栏切换请求方式。"
+
     try:
-        # 尝试发送请求
-        # 注意：如果files不为空，requests自动设为multipart/form-data，忽略json参数
-        # 如果只有data，requests默认用application/x-www-form-urlencoded
-        # 所以对于JSON接口，如果没有文件，要用 json=data
-        
-        if files:
-            resp = requests.post(real_url, data=data, files=files, timeout=60)
+        if method == "POST":
+            # POST 模式：如果有文件用 multipart，没文件用 JSON
+            if files:
+                resp = requests.post(full_url, data=params, files=files, timeout=60)
+            else:
+                resp = requests.post(full_url, json=params, timeout=60)
         else:
-            # 如果没有文件上传，优先尝试 JSON 发送 (大多数推理容器首选 JSON)
-            resp = requests.post(real_url, json=data, timeout=60)
+            # GET 模式：所有参数放在 URL 后面 (例如 ?text=hello)
+            # GET 不支持上传文件流
+            resp = requests.get(full_url, params=params, timeout=60)
 
+        # 结果判读
         if resp.status_code == 200:
+            # 检查返回的是不是音频 (防止返回了 WebUI 的 HTML 网页)
+            content_type = resp.headers.get('Content-Type', '')
+            if 'text/html' in content_type:
+                return None, "❌ 错误：返回了网页HTML而不是音频。\n⚠️ 原因：您连接的是 WebUI 界面 (端口7860)，而不是 API 服务 (通常是9880)。"
             return resp.content, None
+        elif resp.status_code == 405:
+            return None, "❌ 405 Method Not Allowed\n服务端不支持此请求方式。请尝试在侧边栏切换 [请求方式] 为 GET 或 POST。"
         else:
-            return None, f"Server Error {resp.status_code}: {resp.text}"
+            return None, f"Server Error {resp.status_code}: {resp.text[:200]}"
+
     except Exception as e:
-        return None, str(e)
+        return None, f"连接异常: {str(e)}"
 
 # ==========================================
-# 4. 侧边栏
+# 3. 简化版 LLM 分析
+# ==========================================
+def analyze_script(text, key, model):
+    client = OpenAI(api_key=key, base_url="https://yunwu.ai/v1")
+    try:
+        res = client.chat.completions.create(
+            model=model,
+            messages=[{"role":"user","content":f"拆分小说为JSON列表:[{{'role':'角色','text':'对白'}}].无Markdown.文本:{text[:2000]}"}]
+        )
+        return json.loads(res.choices[0].message.content.replace("```json","").replace("```",""))
+    except Exception as e: return f"Error: {e}"
+
+# ==========================================
+# 4. 侧边栏配置 (UI 升级)
 # ==========================================
 with st.sidebar:
-    st.title("⚙️ 设置面板")
+    st.header("⚙️ 设置面板")
     
-    # LLM 设置
-    with st.expander("1. 大模型 (分角)", expanded=False):
+    # LLM
+    with st.expander("1. 模型设置"):
         key = st.text_input("Yunwu Key", type="password")
-        mod = st.selectbox("模型", ["deepseek-chat", "gpt-4o", "自定义"])
-        if mod == "自定义": final_mod = st.text_input("ID", "gpt-4-turbo")
-        else: final_mod = mod
+        mod = st.text_input("模型ID", "deepseek-chat")
 
-    # TTS 设置 (关键修改部分)
-    with st.expander("2. TTS 服务端 (已修复)", expanded=True):
-        raw_url = st.text_input("IndexTTS 根地址", value="https://ffo5lqa2aqpiq89w-7860.container.x-gpu.com/", help="直接复制你图里的那个地址")
+    # TTS (关键修改)
+    with st.expander("2. TTS 连接 (关键)", expanded=True):
+        st.info("如果 7860 报错，请尝试找一下 9880 端口的地址")
         
-        col_test, col_status = st.columns([1, 2])
-        if col_test.button("🔗 测试连接"):
-            with st.spinner("正在探测 API 路径..."):
-                success, real_url, msg = probe_api_url(raw_url)
-                if success:
-                    st.session_state.verified_api_url = real_url
-                    st.success("连接成功！")
-                    st.toast(msg)
-                else:
-                    st.error("连接失败")
-                    st.text(msg)
+        # 让用户自己填完整路径，不要乱猜了
+        tts_url = st.text_input(
+            "完整 API Url", 
+            value="https://ffo5lqa2aqpiq89w-9880.container.x-gpu.com/tts",
+            help="尝试把端口从 7860 改成 9880，并在末尾加上 /tts 试试"
+        )
         
-        if st.session_state.verified_api_url:
-            st.caption(f"✅ 实际调用地址: `{st.session_state.verified_api_url}`")
-        else:
-            st.caption("🔴 未连接")
+        # 增加请求方式切换
+        req_method = st.radio("请求方式", ["POST", "GET"], horizontal=True, help="如果POST报405，试下GET")
 
-    st.divider()
-    uploaded_txt = st.file_uploader("导入剧本", type="txt")
+    uploaded = st.file_uploader("导入 TXT", type="txt")
 
 # ==========================================
 # 5. 主界面
 # ==========================================
-st.title("🎙️ IndexTTS 配音台")
+st.title("🎧 IndexTTS 配音 (诊断模式)")
 
-if uploaded_txt and key:
-    if st.button("🚀 分析剧本"):
-        content = uploaded_txt.getvalue().decode("utf-8")
-        res = analyze_script_llm(content, key, final_mod)
+# 1. 分析
+if uploaded and key:
+    if st.button("🚀 第一步：分析剧本"):
+        txt = uploaded.getvalue().decode("utf-8")
+        res = analyze_script(txt, key, mod)
         if isinstance(res, list):
             st.session_state.script_data = res
             st.session_state.roles = list(set([x['role'] for x in res]))
-else:
-    if not uploaded_txt: st.info("请上传剧本文件")
+        else:
+            st.error(res)
 
+# 2. 生成
 if st.session_state.script_data:
-    c1, c2 = st.columns([1.5, 2.5])
+    st.divider()
+    c1, c2 = st.columns([1, 2])
     
-    # 角色配置区
     with c1:
-        st.subheader("角色配置")
-        for role in st.session_state.roles:
-            if role not in st.session_state.role_configs:
-                st.session_state.role_configs[role] = {}
-            
-            with st.expander(f"👤 {role}", expanded=False):
-                type_ = st.radio("源", ["上传文件", "服务器路径"], key=f"t_{role}", horizontal=True)
-                
-                if type_ == "上传文件":
-                    f = st.file_uploader(f"上传 {role} 音频", type=["wav","mp3"], key=f"f_{role}")
-                    st.session_state.role_configs[role]['uploaded_file'] = f
-                    st.session_state.role_configs[role]['ref_audio_path'] = None
-                else:
-                    p = st.text_input("路径", value=f"/root/api/wavs/{role}.wav", key=f"p_{role}")
-                    st.session_state.role_configs[role]['ref_audio_path'] = p
-                    st.session_state.role_configs[role]['uploaded_file'] = None
+        st.subheader("配置")
+        for r in st.session_state.roles:
+            with st.expander(f"{r}"):
+                # 简单起见，只保留文件上传，因为云端通常无法读取路径
+                f = st.file_uploader(f"上传 {r} 参考音频", key=f"f_{r}")
+                if f:
+                    if r not in st.session_state.role_configs: st.session_state.role_configs[r] = {}
+                    st.session_state.role_configs[r]['uploaded_file'] = f
 
-    # 分镜区
     with c2:
-        st.subheader("分镜列表")
+        st.subheader("列表")
         for i, line in enumerate(st.session_state.script_data):
-            st.markdown(f"**{line['role']}**: {line['text']}")
-            if st.button("▶️ 生成", key=f"b_{i}"):
-                url = st.session_state.verified_api_url
-                if not url:
-                    st.error("请先在侧边栏点击 [测试连接]！")
-                else:
+            col_text, col_btn = st.columns([4, 1])
+            with col_text:
+                st.markdown(f"**{line['role']}**: {line['text']}")
+            with col_btn:
+                if st.button("▶️", key=f"p_{i}"):
                     conf = st.session_state.role_configs.get(line['role'], {})
-                    with st.spinner("生成中..."):
-                        wav, err = call_indextts_api(url, line['text'], conf)
-                        if wav: st.audio(wav, format="audio/wav")
-                        else: st.error(err)
+                    
+                    if not conf.get('uploaded_file'):
+                        st.warning("请先上传参考音频")
+                    else:
+                        with st.spinner(f"正在 {req_method} 请求..."):
+                            wav, err = call_indextts_api(tts_url, line['text'], conf, req_method)
+                            if wav:
+                                st.audio(wav, format="audio/wav")
+                            else:
+                                st.error(err)
             st.divider()
