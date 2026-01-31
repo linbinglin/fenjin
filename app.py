@@ -1,230 +1,232 @@
 import streamlit as st
-from openai import OpenAI
-import re
+import openai
+import json
+import asyncio
+import edge_tts
+import os
+import tempfile
 
-# ================= 页面配置 =================
-st.set_page_config(
-    page_title="AI 分镜生产力工具 (MJ后缀修正版)",
-    page_icon="🎬",
-    layout="wide"
-)
+# --- 页面配置 ---
+st.set_page_config(page_title="AI 智能分角配音助手", layout="wide")
 
-# ================= Session State 初始化 =================
-if 'processed_result' not in st.session_state:
-    st.session_state.processed_result = ""
-if 'current_index' not in st.session_state:
-    st.session_state.current_index = 0
-if 'source_scenes' not in st.session_state:
-    st.session_state.source_scenes = []
+# --- 自定义 CSS 样式，模仿截图中的卡片风格 ---
+st.markdown("""
+<style>
+    .role-card {
+        background-color: #f0f2f6;
+        padding: 15px;
+        border-radius: 10px;
+        margin-bottom: 10px;
+        border-left: 5px solid #4CAF50;
+    }
+    .text-content {
+        color: #333;
+        font-size: 16px;
+    }
+    .role-label {
+        font-weight: bold;
+        color: #555;
+        margin-bottom: 5px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# ================= 侧边栏设置 =================
-with st.sidebar:
-    st.title("⚙️ 工程设置")
+# --- 会话状态初始化 ---
+if 'script_data' not in st.session_state:
+    st.session_state.script_data = [] # 存储分角后的剧本
+if 'roles' not in st.session_state:
+    st.session_state.roles = set()    # 存储所有角色
+if 'role_voice_map' not in st.session_state:
+    st.session_state.role_voice_map = {} # 存储角色与声音的对应关系
+
+# --- 侧边栏：设置 ---
+st.sidebar.title("🛠️ 设置面板")
+
+st.sidebar.subheader("1. 模型接口设置")
+base_url = st.sidebar.text_input("API Base URL", value="https://yunwu.ai/v1/")
+api_key = st.sidebar.text_input("API Key", type="password", help="请输入你的 API Key")
+
+# 模型选择列表
+model_options = [
+    "deepseek-chat",
+    "gpt-4o",
+    "claude-3-5-sonnet-20240620",
+    "gemini-1.5-pro",
+    "grok-beta",
+    "doubao-pro-4k"
+]
+selected_model = st.sidebar.selectbox("选择 AI 模型", model_options + ["自定义..."])
+if selected_model == "自定义...":
+    selected_model = st.sidebar.text_input("输入自定义模型名称")
+
+st.sidebar.subheader("2. 配音设置")
+# 这里列出一些 Edge-TTS 常用中文音色
+voice_options = {
+    "云希 (男神音)": "zh-CN-YunxiNeural",
+    "晓晓 (活泼女声)": "zh-CN-XiaoxiaoNeural",
+    "云健 (体育男声)": "zh-CN-YunjianNeural",
+    "辽宁 (东北老铁)": "zh-CN-liaoning-XiaobeiNeural",
+    "陕西 (方言)": "zh-CN-shaanxi-XiaoniNeural",
+    "云扬 (新闻男声)": "zh-CN-YunyangNeural",
+    "晓伊 (温柔女声)": "zh-CN-XiaoyiNeural"
+}
+
+# --- 核心功能函数 ---
+
+def parse_script_with_ai(text, api_key, base_url, model):
+    """调用大模型进行分角识别"""
+    client = openai.OpenAI(api_key=api_key, base_url=base_url)
     
-    # 1. API 配置
-    with st.expander("🔌 接口与模型 (必填)", expanded=True):
-        api_base = st.text_input("Base URL", value="https://blog.tuiwen.xyz/v1")
-        api_key = st.text_input("API Key", type="password")
+    system_prompt = """
+    你是一个专业的剧本分角助手。请阅读用户提供的文本，识别每一句话的说话人。
+    如果文本是环境描写、动作描写或内心独白，且没有明确说话人，请归类为 "旁白"。
+    
+    请严格按照以下 JSON 格式返回结果（不要包含 Markdown 代码块标记）：
+    [
+        {"role": "旁白", "text": "在合欢宗每双修一次..."},
+        {"role": "火冥", "text": "你要挖鳞片就快一点挖..."},
+        {"role": "旁白", "text": "紧接着又一道清冷的声音响起"},
+        {"role": "凌绝", "text": "苏月我虽然需要火蛟鳞片..."}
+    ]
+    只返回 JSON 数据，不要返回其他任何解释。
+    """
+    
+    try:
+        with st.spinner(f"正在使用 {model} 分析剧本角色..."):
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": text}
+                ],
+                temperature=0.1
+            )
+            content = response.choices[0].message.content
+            # 清理可能存在的 markdown 标记
+            content = content.replace("```json", "").replace("```", "").strip()
+            data = json.loads(content)
+            return data
+    except Exception as e:
+        st.error(f"AI 识别失败: {str(e)}")
+        return None
+
+async def generate_audio_edge(text, voice, output_file):
+    """
+    调用 Edge-TTS 生成音频。
+    如果你有私有的 indextts2 API，可以在这里替换代码。
+    """
+    communicate = edge_tts.Communicate(text, voice)
+    await communicate.save(output_file)
+
+# --- 主界面 ---
+
+st.title("🎙️ AI 剧本分角与配音系统")
+
+# 1. 文件上传
+uploaded_file = st.file_uploader("📂 第一步：上传 TXT 剧本文件", type=["txt"])
+
+if uploaded_file is not None:
+    # 读取文件内容
+    stringio = uploaded_file.getvalue().decode("utf-8")
+    
+    # 显示原始内容预览
+    with st.expander("查看原始文本"):
+        st.text_area("原始内容", stringio, height=150)
+    
+    # 2. AI 分角按钮
+    if st.button("🤖 开始 AI 角色识别"):
+        if not api_key:
+            st.warning("请先在左侧侧边栏输入 API Key！")
+        else:
+            result = parse_script_with_ai(stringio, api_key, base_url, selected_model)
+            if result:
+                st.session_state.script_data = result
+                # 提取所有角色
+                roles = set(item['role'] for item in result)
+                st.session_state.roles = roles
+                st.success(f"识别成功！共发现 {len(roles)} 个角色。")
+
+# 3. 角色配音设置
+if st.session_state.script_data:
+    st.divider()
+    st.header("🎭 第二步：角色配音设置")
+    
+    cols = st.columns(3)
+    # 为每个角色分配声音
+    for i, role in enumerate(st.session_state.roles):
+        with cols[i % 3]:
+            st.markdown(f"**{role}**")
+            # 默认分配
+            default_idx = 0
+            if role == "旁白":
+                default_idx = 5 # 新闻男声
+            elif role in ["系统", "火冥"]:
+                default_idx = 2
+            
+            selected_voice_name = st.selectbox(
+                f"选择音色", 
+                options=list(voice_options.keys()),
+                key=f"voice_{role}",
+                index=default_idx
+            )
+            st.session_state.role_voice_map[role] = voice_options[selected_voice_name]
+
+    # 4. 显示分镜预览与生成
+    st.divider()
+    st.header("🎬 第三步：分镜预览与合成")
+    
+    # 显示类似截图的分镜列表
+    for idx, item in enumerate(st.session_state.script_data):
+        role = item['role']
+        text = item['text']
         
-        model_options = ["gpt-4o", "claude-3-5-sonnet-20240620", "deepseek-chat"]
-        selected_model = st.selectbox("选择模型", model_options)
-        custom_model = st.text_input("自定义 Model ID", placeholder="优先使用此ID")
-        final_model = custom_model if custom_model else selected_model
-
-    # 2. 画风控制 (修改点：明确只针对MJ)
-    st.divider()
-    st.subheader("🎨 MJ 画风控制")
-    style_suffix = st.text_area(
-        "画风后缀 (仅追加到画面描述)", 
-        value="--ar 16:9 --v 6.0 --style raw",
-        height=70,
-        help="这些参数只会出现在【画面描述】的末尾。视频生成描述将保持纯净。"
-    )
-
-    # 3. 批处理策略
-    st.divider()
-    st.subheader("⚡ 批处理策略")
-    batch_size = st.slider(
-        "单次生成数量", 
-        min_value=1, 
-        max_value=50, 
-        value=10, 
-        help="推荐策略：先用10个测试，确认无误后拉到30个全速生成。"
-    )
-
-    # 4. 角色设定
-    st.divider()
-    st.subheader("👤 角色一致性")
-    default_profile = "赵清月：(清冷美人，眉眼极精致，肤白如雪，银丝蝴蝶坠珠簪，白色刺绣绫罗纱衣)\n赵灵曦：(明艳张扬，杏眼桃色腮，肤白如雪，金丝花纹簪，黄色妆花襦裙)"
-    character_profile = st.text_area("人物资料库 (括号Tag格式)", height=200, value=default_profile)
-
-# ================= 核心逻辑 =================
-
-def parse_source_text(text):
-    """智能解析分镜序号"""
-    text = text.replace("\r\n", "\n")
-    pattern = r'(^|\n)(\d+[.、:：\s])'
-    segments = re.split(pattern, text)
-    scenes = []
-    current_scene = ""
-    for segment in segments:
-        if not segment: continue
-        if re.match(r'\d+[.、:：\s]', segment):
-            if current_scene.strip(): scenes.append(current_scene.strip())
-            current_scene = segment
-        elif segment.strip() == "": continue
-        else: current_scene += segment
-    if current_scene.strip(): scenes.append(current_scene.strip())
-    # 容错处理
-    if len(scenes) < 2: 
-        scenes = [line.strip() for line in text.split('\n') if line.strip()]
-    return scenes
-
-def generate_prompt(batch_scenes, profile, suffix):
-    """
-    【修改点】：构建 Prompt
-    明确指示：后缀只加给画面，视频不要加
-    """
-    scene_text = "\n\n".join(batch_scenes)
+        # 渲染卡片
+        col1, col2 = st.columns([1, 5])
+        with col1:
+            st.info(f"👤 {role}")
+        with col2:
+            st.markdown(f'<div class="text-content">{text}</div>', unsafe_allow_html=True)
     
-    return f"""
-你是一个专业分镜师。请处理以下分镜文案。
-
-### 🚨 强制执行规则 🚨
-
-1.  **人物一致性**：
-    *   必须熟读下方的【人物资料库】。
-    *   在【画面描述】中，只要出现该角色，必须**原样复制**括号内的外貌Tag。
-
-2.  **后缀追加规则 (仅限画面)**：
-    *   请将后缀 `{suffix}` 追加到每一个【画面描述】的末尾。
-    *   **注意**：【视频生成】描述**严禁**添加此后缀。
-
-3.  **分镜拆分与合并**：
-    *   文案过长（>40字）或动作过多时，请拆分为 X-1, X-2。
-    *   文案极短且画面连贯时，可合并。
-
-4.  **描述分离**：
-    *   **画面描述**：Midjourney用。静态，场景+人物状态+外貌Tag+后缀。
-    *   **视频生成**：即梦AI用。动态，具体动作+运镜。(纯净描述，无参数)
-
----
-【人物资料库】：
-{profile}
-
-【待处理文案】：
-{scene_text}
-
----
-### 输出格式（严格）：
-NO.x 文案：[内容]
-画面描述：[场景]，[静态动作]，(角色名，外貌Tag)，{suffix}
-视频生成：[具体连贯动作]，[镜头运镜]
-"""
-
-# ================= 主界面 =================
-
-st.title("🎬 AI 分镜生产力工具")
-st.markdown("流程建议：1. 上传文案 -> 2. **先生成10个预览** -> 3. **调整滑块到30** -> 4. 继续生成剩余内容")
-
-uploaded_file = st.file_uploader("📂 上传分镜文案 (.txt)", type=["txt"])
-
-if uploaded_file:
-    file_content = uploaded_file.getvalue().decode("utf-8")
-    
-    # 解析文件
-    if not st.session_state.source_scenes:
-        st.session_state.source_scenes = parse_source_text(file_content)
-        st.toast(f"已识别 {len(st.session_state.source_scenes)} 个分镜片段", icon="✅")
-
-    total_scenes = len(st.session_state.source_scenes)
-    
-    # 进度展示
-    col_prog, col_stat = st.columns([3, 1])
-    with col_prog:
-        progress = st.session_state.current_index / total_scenes if total_scenes > 0 else 0
-        st.progress(progress)
-    with col_stat:
-        st.caption(f"进度：{st.session_state.current_index} / {total_scenes}")
-
-    # ================= 操作区 =================
-    col1, col2 = st.columns([1, 4])
-    
-    with col1:
-        # 动态按钮逻辑
-        if st.session_state.current_index < total_scenes:
-            # 计算本次将要处理的范围
-            start_idx = st.session_state.current_index
-            end_idx = min(start_idx + batch_size, total_scenes)
-            count = end_idx - start_idx
+    # 合成按钮
+    if st.button("🎧 开始生成配音 (调用 TTS)"):
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        audio_results = []
+        
+        temp_dir = tempfile.mkdtemp()
+        
+        total_lines = len(st.session_state.script_data)
+        
+        for i, item in enumerate(st.session_state.script_data):
+            role = item['role']
+            text = item['text']
+            voice = st.session_state.role_voice_map.get(role, "zh-CN-XiaoxiaoNeural")
             
-            btn_label = "🚀 开始测试 (10个)" if start_idx == 0 else f"⏭️ 继续生成 ({count}个)"
+            status_text.text(f"正在生成 ({i+1}/{total_lines}): {role} - {text[:10]}...")
             
-            if st.button(btn_label, type="primary"):
-                if not api_key:
-                    st.error("请填写 API Key")
-                elif not character_profile.strip():
-                    st.error("请填写角色设定")
-                else:
-                    # 获取当前批次数据
-                    current_batch = st.session_state.source_scenes[start_idx:end_idx]
-                    
-                    # 生成 Prompt (传入后缀)
-                    user_prompt = generate_prompt(current_batch, character_profile, style_suffix)
-                    
-                    client = OpenAI(api_key=api_key, base_url=api_base)
-                    
-                    try:
-                        with st.spinner(f"AI 正在推理第 {start_idx+1} - {end_idx} 个分镜..."):
-                            response_placeholder = st.empty()
-                            full_text = ""
-                            
-                            # 流式生成
-                            stream = client.chat.completions.create(
-                                model=final_model,
-                                messages=[
-                                    {"role": "system", "content": "你是一个严格执行格式的AI助手。"},
-                                    {"role": "user", "content": user_prompt}
-                                ],
-                                stream=True,
-                                temperature=0.6
-                            )
-                            
-                            for chunk in stream:
-                                if chunk.choices[0].delta.content:
-                                    content = chunk.choices[0].delta.content
-                                    full_text += content
-                                    response_placeholder.markdown(f"**⚡ 正在生成...**\n\n{full_text}")
-                            
-                            # 完成后追加结果
-                            header = f"\n\n=== 批次 {start_idx+1}-{end_idx} ===\n\n"
-                            st.session_state.processed_result += (header + full_text)
-                            st.session_state.current_index = end_idx
-                            st.rerun()
-                            
-                    except Exception as e:
-                        st.error(f"出错: {str(e)}")
-        else:
-            st.success("✅ 所有分镜处理完毕！")
-            if st.button("🗑️ 清空重置"):
-                st.session_state.current_index = 0
-                st.session_state.processed_result = ""
-                st.session_state.source_scenes = []
-                st.rerun()
-
-    # ================= 结果展示区 =================
-    with col2:
-        st.subheader("📝 结果输出")
-        if st.session_state.processed_result:
-            st.download_button(
-                "💾 下载完整结果 (.txt)", 
-                st.session_state.processed_result, 
-                "分镜提示词_完整版.txt"
-            )
-            st.text_area(
-                "结果预览", 
-                value=st.session_state.processed_result, 
-                height=600
-            )
-        else:
-            st.info("👈 点击左侧按钮开始生成，结果将显示在这里。")
+            # 生成文件名
+            filename = f"{i:03d}_{role}.mp3"
+            filepath = os.path.join(temp_dir, filename)
+            
+            # 异步调用 TTS
+            try:
+                asyncio.run(generate_audio_edge(text, voice, filepath))
+                audio_results.append({
+                    "role": role,
+                    "text": text,
+                    "file": filepath
+                })
+            except Exception as e:
+                st.error(f"生成失败: {str(e)}")
+            
+            progress_bar.progress((i + 1) / total_lines)
+            
+        status_text.text("✅ 所有配音生成完毕！")
+        
+        # 5. 展示结果
+        st.subheader("播放列表")
+        for audio in audio_results:
+            st.markdown(f"**{audio['role']}**: {audio['text']}")
+            st.audio(audio['file'])
+            
+            # 这里如果你想提供打包下载，可以使用 zipfile 库打包 temp_dir 下的文件
