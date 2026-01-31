@@ -2,209 +2,222 @@ import streamlit as st
 import json
 import requests
 from openai import OpenAI
-import io
 
 # ==========================================
-# 1. 页面初始化
+# 1. 页面配置
 # ==========================================
-st.set_page_config(layout="wide", page_title="AI 配音工作台 (修复版)")
+st.set_page_config(layout="wide", page_title="AI 配音工作台 (智能修复版)")
 
 # 初始化 Session State
-if 'script_data' not in st.session_state:
-    st.session_state.script_data = None
-if 'roles' not in st.session_state:
-    st.session_state.roles = []
-if 'role_configs' not in st.session_state:
-    st.session_state.role_configs = {}
+if 'script_data' not in st.session_state: st.session_state.script_data = None
+if 'roles' not in st.session_state: st.session_state.roles = []
+if 'role_configs' not in st.session_state: st.session_state.role_configs = {}
+# 新增状态：存储探测到的正确API完整地址
+if 'verified_api_url' not in st.session_state: st.session_state.verified_api_url = ""
 
 # ==========================================
-# 2. 核心逻辑函数
+# 2. 核心逻辑：智能接口探测
 # ==========================================
-
-def analyze_script_llm(text, api_key, model_id):
-    """Yunwu AI 角色拆分"""
-    client = OpenAI(api_key=api_key, base_url="https://yunwu.ai/v1")
-    
-    prompt = f"""
-    将文本拆分为JSON列表：[{{"role": "角色名", "text": "对白"}}]。
-    不要Markdown。
-    文本：{text[:3000]}
+def probe_api_url(base_url):
     """
-    try:
-        response = client.chat.completions.create(
-            model=model_id,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1
-        )
-        content = response.choices[0].message.content.replace("```json", "").replace("```", "")
-        return json.loads(content)
-    except Exception as e:
-        return f"Error: {e}"
-
-def call_indextts_api(api_url, text, config):
+    自动探测正确的 API 后缀
     """
-    IndexTTS 配音调用 (支持文件上传 & 路径)
-    """
-    # 1. 简单的地址修正 (解决 Method Not Allowed)
-    # 如果用户填写的地址是以 .app 结尾并没有带 /tts，我们尝试智能补全
-    # 注意：这取决于您的IndexTTS具体部署代码，常见的endpoint是 /tts 或 /
-    # 您可以在侧边栏手动修改完整的 API URL
+    # 去掉末尾斜杠
+    base_url = base_url.rstrip("/")
     
-    if not api_url: return None, "未填写API地址"
-
-    # 准备基础参数
-    # 如果是上传文件，必须使用 multipart/form-data 格式发送
-    # requests 库中，files 参数会自动将 header 转为 multipart
+    # 常见的 IndexTTS / GPT-SoVITS 接口后缀
+    endpoints = [
+        "",              # 尝试直接请求 (有些API就是根目录)
+        "/tts",          # 最常见的
+        "/inference",    # 常见变体
+        "/v1/inference", # 规范化接口
+        "/api/generate"  # 也是常见的一种
+    ]
     
-    try:
-        data_params = {
-            "text": text,
-            "text_lang": "zh",
-            "emotion_mode": config.get("emotion_mode", "same_as_ref"),
-            "speed": 1.0
-        }
+    # 构造一个极简的测试 Payload
+    test_payload = {
+        "text": "测试",
+        "text_lang": "zh", 
+        "ref_audio_path": "dummy.wav",
+        "prompt_text": "测试",
+        "prompt_lang": "zh"
+    }
 
-        # 处理情感向量
-        vectors = config.get("vectors", {})
-        if vectors:
-            # 很多API要求向量转为JSON字符串传递
-            data_params["emotion_vector"] = json.dumps(vectors)
-
-        uploaded_file = config.get("uploaded_file") # 用户上传的文件对象
-        path_str = config.get("ref_audio_path")     # 用户填写的路径字符串
-        
-        files = {}
-        
-        # 优先使用上传的文件
-        if uploaded_file:
-            # 重置指针
-            uploaded_file.seek(0)
-            # 发送文件二进制流，字段名通常是 'ref_audio' 或 'refer_wav_path'
-            # 您需要根据您的后端API文档确认这个 key 的名字，这里假设是 'ref_audio'
-            files = {
-                'ref_audio': (uploaded_file.name, uploaded_file, 'audio/wav')
-            }
-        elif path_str:
-            # 如果没上传文件，但有路径，则作为普通表单字段发送
-            data_params["ref_audio_path"] = path_str
-
-        # 发送请求
-        # 注意：使用 files 时，data_params 会作为 form-data 发送，而不是 json
-        response = requests.post(api_url, data=data_params, files=files if files else None, timeout=60)
-        
-        if response.status_code == 200:
-            return response.content, None
-        elif response.status_code == 405:
-            return None, f"❌ 405错误：请求方法不被允许。\n请检查API地址后缀！\n通常API地址不是根目录，而是类似: \n{api_url}/tts \n或 {api_url}/inference"
-        else:
-            return None, f"服务端报错: {response.status_code} - {response.text}"
+    log_msg = []
+    
+    for endpoint in endpoints:
+        full_url = f"{base_url}{endpoint}"
+        try:
+            # 尝试发送 POST 请求，超时设置短一点
+            resp = requests.post(full_url, json=test_payload, timeout=3)
             
-    except Exception as e:
-        return None, f"请求异常: {str(e)}"
+            # 如果状态码是 200 (成功) 或 400/422 (参数错误但路径对了)
+            # 说明这个接口是通的，不是 404 也不是 405
+            if resp.status_code == 200:
+                return True, full_url, f"✅ 成功连接到: {full_url}"
+            elif resp.status_code in [400, 422, 500]:
+                # 虽然报错但说明服务器接收了请求，只是参数不对，说明路径是对的
+                return True, full_url, f"✅ 发现接口(参数待调整): {full_url}"
+            else:
+                log_msg.append(f"❌ {full_url} 返回 {resp.status_code}")
+                
+        except Exception as e:
+            log_msg.append(f"❌ {full_url} 连接超时或失败")
+            
+    return False, None, "\n".join(log_msg)
 
 # ==========================================
-# 3. 侧边栏配置
+# 3. 业务逻辑函数
+# ==========================================
+def analyze_script_llm(text, api_key, model_id):
+    client = OpenAI(api_key=api_key, base_url="https://yunwu.ai/v1")
+    prompt = f"拆分小说为JSON列表:[{{'role':'角色','text':'对白'}}]. 无Markdown. 文本:{text[:2000]}"
+    try:
+        resp = client.chat.completions.create(
+            model=model_id, messages=[{"role":"user","content":prompt}], temperature=0.1
+        )
+        return json.loads(resp.choices[0].message.content.replace("```json","").replace("```",""))
+    except Exception as e: return f"Error: {e}"
+
+def call_indextts_api(real_url, text, config):
+    if not real_url: return None, "请先在侧边栏点击[测试连接]获取正确地址"
+    
+    # 构建请求
+    # 这里处理最棘手的部分：上传文件 vs 路径
+    
+    # 如果后端是标准的 IndexTTS/GPT-SoVITS 容器，通常接收 JSON
+    # 我们需要将 config 里的参数转为后端需要的格式
+    
+    # 构造 multipart/form-data
+    files = {}
+    data = {
+        "text": text,
+        "text_lang": "zh",
+        "speed": 1.0,
+        "emotion_mode": config.get("emotion_mode", "same_as_ref")
+    }
+    
+    # 处理向量
+    if config.get("vectors"):
+        data["emotion_vector"] = json.dumps(config.get("vectors"))
+
+    # 处理音频源
+    up_file = config.get("uploaded_file")
+    ref_path = config.get("ref_audio_path")
+
+    if up_file:
+        up_file.seek(0)
+        # 关键：字段名通常是 'ref_audio'
+        files = {'ref_audio': (up_file.name, up_file, 'audio/wav')}
+    elif ref_path:
+        data['ref_audio_path'] = ref_path
+        
+    try:
+        # 尝试发送请求
+        # 注意：如果files不为空，requests自动设为multipart/form-data，忽略json参数
+        # 如果只有data，requests默认用application/x-www-form-urlencoded
+        # 所以对于JSON接口，如果没有文件，要用 json=data
+        
+        if files:
+            resp = requests.post(real_url, data=data, files=files, timeout=60)
+        else:
+            # 如果没有文件上传，优先尝试 JSON 发送 (大多数推理容器首选 JSON)
+            resp = requests.post(real_url, json=data, timeout=60)
+
+        if resp.status_code == 200:
+            return resp.content, None
+        else:
+            return None, f"Server Error {resp.status_code}: {resp.text}"
+    except Exception as e:
+        return None, str(e)
+
+# ==========================================
+# 4. 侧边栏
 # ==========================================
 with st.sidebar:
-    st.header("⚙️ 设置")
+    st.title("⚙️ 设置面板")
     
-    # 1. LLM 设置
-    with st.expander("🤖 模型设置", expanded=False):
-        user_api_key = st.text_input("Yunwu API Key", type="password")
-        model_options = ["deepseek-chat", "gpt-4o", "gemini-3-pro-preview", "🔃 自定义输入"]
-        opt = st.selectbox("选择模型", model_options)
-        if opt == "🔃 自定义输入":
-            final_model = st.text_input("输入模型ID", "gpt-4-turbo")
-        else:
-            final_model = opt
+    # LLM 设置
+    with st.expander("1. 大模型 (分角)", expanded=False):
+        key = st.text_input("Yunwu Key", type="password")
+        mod = st.selectbox("模型", ["deepseek-chat", "gpt-4o", "自定义"])
+        if mod == "自定义": final_mod = st.text_input("ID", "gpt-4-turbo")
+        else: final_mod = mod
 
-    # 2. TTS 后端设置 (解决 405 问题)
-    with st.expander("🔊 TTS 服务端", expanded=True):
-        st.info("⚠️ 注意：API地址通常以 /tts 或 /generate 结尾")
-        tts_api_input = st.text_input(
-            "API 完整地址", 
-            # 帮用户预设一个常见的后缀，避免直接填根域名
-            value="http://127.0.0.1:9880/tts", 
-            help="如果是Ngrok，请确保填写的不是WebUI地址，而是API Endpoint"
-        )
+    # TTS 设置 (关键修改部分)
+    with st.expander("2. TTS 服务端 (已修复)", expanded=True):
+        raw_url = st.text_input("IndexTTS 根地址", value="https://ffo5lqa2aqpiq89w-7860.container.x-gpu.com/", help="直接复制你图里的那个地址")
+        
+        col_test, col_status = st.columns([1, 2])
+        if col_test.button("🔗 测试连接"):
+            with st.spinner("正在探测 API 路径..."):
+                success, real_url, msg = probe_api_url(raw_url)
+                if success:
+                    st.session_state.verified_api_url = real_url
+                    st.success("连接成功！")
+                    st.toast(msg)
+                else:
+                    st.error("连接失败")
+                    st.text(msg)
+        
+        if st.session_state.verified_api_url:
+            st.caption(f"✅ 实际调用地址: `{st.session_state.verified_api_url}`")
+        else:
+            st.caption("🔴 未连接")
 
     st.divider()
-    uploaded_file = st.file_uploader("📂 导入剧本 TXT", type="txt")
+    uploaded_txt = st.file_uploader("导入剧本", type="txt")
 
 # ==========================================
-# 4. 主流程
+# 5. 主界面
 # ==========================================
-st.title("🎙️ 智能配音工作台 (Fix)")
+st.title("🎙️ IndexTTS 配音台")
 
-# [步骤 1: 拆分文本]
-if uploaded_file and user_api_key:
+if uploaded_txt and key:
     if st.button("🚀 分析剧本"):
-        txt = uploaded_file.getvalue().decode("utf-8")
-        with st.spinner("AI 正在拆分角色..."):
-            res = analyze_script_llm(txt, user_api_key, final_model)
-            if isinstance(res, list):
-                st.session_state.script_data = res
-                st.session_state.roles = list(set([x['role'] for x in res]))
-                st.success("✅ 拆分完成")
-            else:
-                st.error(f"分析失败: {res}")
+        content = uploaded_txt.getvalue().decode("utf-8")
+        res = analyze_script_llm(content, key, final_mod)
+        if isinstance(res, list):
+            st.session_state.script_data = res
+            st.session_state.roles = list(set([x['role'] for x in res]))
+else:
+    if not uploaded_txt: st.info("请上传剧本文件")
 
-# [步骤 2: 配音面板]
 if st.session_state.script_data:
     c1, c2 = st.columns([1.5, 2.5])
     
-    # --- 左侧：角色配置 (增加上传功能) ---
+    # 角色配置区
     with c1:
-        st.subheader("🎚️ 角色音色设置")
+        st.subheader("角色配置")
         for role in st.session_state.roles:
             if role not in st.session_state.role_configs:
                 st.session_state.role_configs[role] = {}
-                
-            with st.expander(f"👤 {role}", expanded=False):
-                # 选项：使用文件上传 还是 服务器路径
-                source_type = st.radio("音色来源", ["🔼 上传本地音频", "🔗 服务器文件路径"], key=f"src_{role}", horizontal=True)
-                
-                if source_type == "🔼 上传本地音频":
-                    # [修复问题1] 添加上传控件
-                    up_file = st.file_uploader(f"上传 {role} 的参考音频", type=["wav", "mp3"], key=f"up_{role}")
-                    st.session_state.role_configs[role]['uploaded_file'] = up_file
-                    st.session_state.role_configs[role]['ref_audio_path'] = None # 清空路径
-                else:
-                    user_path = st.text_input(f"服务器路径", value=f"D:/Data/{role}.wav", key=f"path_{role}")
-                    st.session_state.role_configs[role]['ref_audio_path'] = user_path
-                    st.session_state.role_configs[role]['uploaded_file'] = None # 清空文件
-
-                # 情感
-                emo = st.selectbox("情感模式", ["与参考音频相同", "使用情感向量"], key=f"emm_{role}")
-                st.session_state.role_configs[role]['emotion_mode'] = emo
-                
-                if emo == "使用情感向量":
-                    v = {}
-                    cc1, cc2 = st.columns(2)
-                    v['happy'] = cc1.slider("Joy", 0.0, 1.0, key=f"h_{role}")
-                    v['sad'] = cc2.slider("Sad", 0.0, 1.0, key=f"s_{role}")
-                    st.session_state.role_configs[role]['vectors'] = v
-
-    # --- 右侧：合成 ---
-    with c2:
-        st.subheader("📜 合成列表")
-        for i, line in enumerate(st.session_state.script_data):
-            role = line['role']
-            text = line['text']
             
-            with st.container():
-                st.markdown(f"**{role}**: {text}")
-                if st.button("▶️ 生成音频", key=f"btn_{i}"):
-                    conf = st.session_state.role_configs.get(role, {})
-                    
-                    # 检查是否配置了声音
-                    if not conf.get('uploaded_file') and not conf.get('ref_audio_path'):
-                        st.warning("⚠️ 请先在左侧上传音频或填写路径！")
-                    else:
-                        with st.spinner("请求中..."):
-                            wav, err = call_indextts_api(tts_api_input, text, conf)
-                            if wav:
-                                st.audio(wav, format="audio/wav")
-                            else:
-                                st.error(err)
+            with st.expander(f"👤 {role}", expanded=False):
+                type_ = st.radio("源", ["上传文件", "服务器路径"], key=f"t_{role}", horizontal=True)
+                
+                if type_ == "上传文件":
+                    f = st.file_uploader(f"上传 {role} 音频", type=["wav","mp3"], key=f"f_{role}")
+                    st.session_state.role_configs[role]['uploaded_file'] = f
+                    st.session_state.role_configs[role]['ref_audio_path'] = None
+                else:
+                    p = st.text_input("路径", value=f"/root/api/wavs/{role}.wav", key=f"p_{role}")
+                    st.session_state.role_configs[role]['ref_audio_path'] = p
+                    st.session_state.role_configs[role]['uploaded_file'] = None
+
+    # 分镜区
+    with c2:
+        st.subheader("分镜列表")
+        for i, line in enumerate(st.session_state.script_data):
+            st.markdown(f"**{line['role']}**: {line['text']}")
+            if st.button("▶️ 生成", key=f"b_{i}"):
+                url = st.session_state.verified_api_url
+                if not url:
+                    st.error("请先在侧边栏点击 [测试连接]！")
+                else:
+                    conf = st.session_state.role_configs.get(line['role'], {})
+                    with st.spinner("生成中..."):
+                        wav, err = call_indextts_api(url, line['text'], conf)
+                        if wav: st.audio(wav, format="audio/wav")
+                        else: st.error(err)
             st.divider()
