@@ -6,233 +6,245 @@ import os
 import tempfile
 import time
 
-# --- 页面配置 ---
-st.set_page_config(page_title="AI 智能分角 + IndexTTS 配音", layout="wide")
+# --- 页面全局配置 ---
+st.set_page_config(page_title="IndexTTS 高级配音工作台", layout="wide")
 
-# --- 自定义 CSS 样式 ---
+# --- CSS 样式优化：让界面更像原生应用 ---
 st.markdown("""
 <style>
-    .role-card {
-        background-color: #f0f2f6;
-        padding: 15px;
+    /* 角色卡片样式 */
+    .role-container {
+        background-color: #2b2b2b;
+        padding: 20px;
         border-radius: 10px;
-        margin-bottom: 10px;
-        border-left: 5px solid #4CAF50;
+        border: 1px solid #444;
+        margin-bottom: 20px;
     }
-    .text-content {
-        color: #333;
-        font-size: 16px;
-    }
-    .stTextInput > label {
+    .role-header {
+        font-size: 20px;
         font-weight: bold;
+        color: #fff;
+        margin-bottom: 10px;
+        border-bottom: 1px solid #555;
+        padding-bottom: 5px;
+    }
+    /* 模拟截图中的深色背景输入框 */
+    .stTextInput input {
+        background-color: #1e1e1e;
+        color: #e0e0e0;
+        border: 1px solid #555;
+    }
+    /* 滑块样式微调 */
+    .stSlider > div > div > div > div {
+        background-color: #7c4dff;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 会话状态初始化 ---
+# --- Session State 初始化 ---
 if 'script_data' not in st.session_state:
-    st.session_state.script_data = [] # 存储分角后的剧本
+    st.session_state.script_data = []
 if 'roles' not in st.session_state:
-    st.session_state.roles = set()    # 存储所有角色
-if 'role_map' not in st.session_state:
-    st.session_state.role_map = {}    # 存储 剧本角色 -> IndexTTS角色名 的映射
+    st.session_state.roles = set()
+if 'role_settings' not in st.session_state:
+    st.session_state.role_settings = {} # 存储每个角色的详细配置
 
-# --- 侧边栏：设置 ---
-st.sidebar.title("🛠️ 设置面板")
+# ================= 侧边栏配置 =================
+st.sidebar.title("🛠️ 系统设置")
 
-# 1. 大模型设置
-with st.sidebar.expander("1. 角色识别模型设置 (Yunwu/OpenAI)", expanded=True):
-    base_url = st.text_input("LLM Base URL", value="https://yunwu.ai/v1/")
-    llm_api_key = st.text_input("LLM API Key", type="password", help="请输入你的 Yunwu 或 OpenAI API Key")
-    
-    model_options = [
-        "deepseek-chat",
-        "gpt-4o",
-        "claude-3-5-sonnet-20240620",
-        "gemini-1.5-pro",
-        "grok-beta",
-        "doubao-pro-4k"
-    ]
-    selected_model = st.selectbox("选择 AI 模型", model_options + ["自定义..."])
-    if selected_model == "自定义...":
-        selected_model = st.text_input("输入自定义模型名称")
+with st.sidebar.expander("1. 模型接口 (LLM)", expanded=False):
+    llm_base_url = st.text_input("Base URL", value="https://yunwu.ai/v1/")
+    llm_api_key = st.text_input("API Key", type="password")
+    model_options = ["deepseek-chat", "gpt-4o", "claude-3-5-sonnet", "gemini-1.5-pro"]
+    selected_model = st.selectbox("选择模型", model_options + ["自定义"])
+    if selected_model == "自定义":
+        selected_model = st.text_input("输入模型名称")
 
-# 2. 配音接口设置
-with st.sidebar.expander("2. IndexTTS 配音接口设置", expanded=True):
-    st.info("请确保你的 IndexTTS 服务已启动并可被公网访问（如果是 Streamlit Cloud）")
-    # 这里填写你的 API 地址，比如 http://123.45.67.89:5000/tts 或 https://api.yourdomain.com/v1/generate
-    tts_api_url = st.text_input("IndexTTS API 地址", value="http://127.0.0.1:9880/tts")
-    
-    st.markdown("**API 调用参数说明:**")
-    st.caption("本程序将默认以 POST 方式发送 JSON 数据：`{'text': '...', 'speaker': '...'}`。如需更改字段名请修改代码中 `generate_audio_index` 函数。")
+with st.sidebar.expander("2. IndexTTS 接口设置", expanded=True):
+    tts_api_url = st.text_input("API 地址", value="http://127.0.0.1:9880/tts_advanced")
+    st.caption("注：此接口需支持接收 emotion_vector 和 ref_audio_path 参数")
 
-# --- 核心功能函数 ---
+# ================= 核心函数 =================
 
-def parse_script_with_ai(text, api_key, base_url, model):
-    """调用大模型进行分角识别"""
-    if not api_key:
-        st.error("请先填写 LLM API Key")
+def parse_script_with_ai(text):
+    """AI 角色识别"""
+    if not llm_api_key:
+        st.error("请先设置 API Key")
         return None
-        
-    client = openai.OpenAI(api_key=api_key, base_url=base_url)
     
-    system_prompt = """
-    你是一个专业的剧本分角助手。请阅读用户提供的文本，识别每一句话的说话人。
-    如果文本是环境描写、动作描写或内心独白，且没有明确说话人，请归类为 "旁白"。
-    
-    请严格按照以下 JSON 格式返回结果（不要包含 Markdown 代码块标记）：
-    [
-        {"role": "旁白", "text": "在合欢宗每双修一次..."},
-        {"role": "火冥", "text": "你要挖鳞片就快一点挖..."},
-        {"role": "旁白", "text": "紧接着又一道清冷的声音响起"},
-        {"role": "凌绝", "text": "苏月我虽然需要火蛟鳞片..."}
-    ]
-    只返回 JSON 数据，不要返回其他任何解释。
+    client = openai.OpenAI(api_key=llm_api_key, base_url=llm_base_url)
+    prompt = """
+    分析剧本，提取角色和台词。
+    格式：JSON 数组 [{"role": "角色名", "text": "台词内容"}]
+    如果是旁白，role 填 "旁白"。
+    只返回 JSON，无Markdown。
     """
-    
     try:
-        with st.spinner(f"正在使用 {model} 分析剧本角色..."):
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": text}
-                ],
+        with st.spinner("正在分析剧本..."):
+            resp = client.chat.completions.create(
+                model=selected_model,
+                messages=[{"role": "system", "content": prompt}, {"role": "user", "content": text}],
                 temperature=0.1
             )
-            content = response.choices[0].message.content
-            # 清理可能存在的 markdown 标记
-            content = content.replace("```json", "").replace("```", "").strip()
-            data = json.loads(content)
-            return data
+            return json.loads(resp.choices[0].message.content.replace("```json","").replace("```",""))
     except Exception as e:
-        st.error(f"AI 识别失败: {str(e)}")
+        st.error(f"解析失败: {e}")
         return None
 
-def generate_audio_index(api_url, text, speaker_name, output_file):
+def generate_audio_advanced(api_url, text, settings, output_path):
     """
-    调用 IndexTTS 接口生成音频
-    注意：不同的 IndexTTS 版本参数可能不同（如 spk_id, character, speaker 等）
-    请根据你的实际 API 文档修改下面的 json payload 字段。
+    调用支持高级参数的 TTS 接口
+    settings: 包含 ref_audio_path, emotion_mode, emotion_vector 等字典
     """
-    headers = {'Content-Type': 'application/json'}
-    
-    # --- 关键：根据你的 API 格式修改这里 ---
+    # 构建符合截图逻辑的 Payload
     payload = {
-        "text": text,           # 文本内容
-        "speaker": speaker_name, # 角色名称/ID
-        "format": "mp3",        # 格式
-        "speed": 1.0            # 语速
+        "text": text,
+        "ref_audio_path": settings.get("ref_audio_path", ""),
+        "emotion_control": settings.get("emotion_mode", "使用情感向量"),
+        "format": "mp3"
     }
-    # ------------------------------------
+    
+    # 只有选择了“使用情感向量”才发送具体的数值
+    if settings.get("emotion_mode") == "使用情感向量":
+        payload["emotion_vector"] = {
+            "happy": settings.get("happy", 0.0),
+            "angry": settings.get("angry", 0.0),
+            "sad": settings.get("sad", 0.0),
+            "fear": settings.get("fear", 0.0),
+            "disgust": settings.get("disgust", 0.0),
+            "surprise": settings.get("surprise", 0.0),
+        }
 
     try:
-        response = requests.post(api_url, json=payload, headers=headers, timeout=60)
-        
-        if response.status_code == 200:
-            # 假设返回的是二进制音频文件
-            with open(output_file, 'wb') as f:
-                f.write(response.content)
+        resp = requests.post(api_url, json=payload, timeout=60)
+        if resp.status_code == 200:
+            with open(output_path, "wb") as f:
+                f.write(resp.content)
             return True
         else:
-            st.error(f"API 错误 [{response.status_code}]: {response.text}")
+            print(f"Error: {resp.text}")
             return False
-    except requests.exceptions.ConnectionError:
-        st.error(f"无法连接到 API 地址: {api_url}。如果是在线运行，请确保地址是公网可访问的。")
-        return False
     except Exception as e:
-        st.error(f"请求发生错误: {str(e)}")
+        print(f"Request Error: {e}")
         return False
 
-# --- 主界面 ---
+# ================= 主界面逻辑 =================
 
-st.title("🎙️ AI 分角 + IndexTTS 配音助手")
+st.title("🎛️ AI 剧本配音 - 高级控制版")
 
-# 1. 文件上传
-uploaded_file = st.file_uploader("📂 第一步：上传 TXT 剧本文件", type=["txt"])
+# --- 第一步：上传与识别 ---
+uploaded_file = st.file_uploader("1. 上传剧本 (TXT)", type="txt")
+if uploaded_file and st.button("开始角色分析"):
+    text = uploaded_file.getvalue().decode("utf-8")
+    result = parse_script_with_ai(text)
+    if result:
+        st.session_state.script_data = result
+        st.session_state.roles = sorted(list(set(r['role'] for r in result)))
+        st.success(f"识别到 {len(st.session_state.roles)} 个角色")
 
-if uploaded_file is not None:
-    stringio = uploaded_file.getvalue().decode("utf-8")
-    
-    with st.expander("查看原始文本"):
-        st.text_area("原始内容", stringio, height=150)
-    
-    # 2. AI 分角按钮
-    if st.button("🤖 1. 开始 AI 角色识别"):
-        result = parse_script_with_ai(stringio, llm_api_key, base_url, selected_model)
-        if result:
-            st.session_state.script_data = result
-            # 提取所有角色
-            roles = set(item['role'] for item in result)
-            st.session_state.roles = roles
-            st.success(f"识别成功！共发现 {len(roles)} 个角色。")
-
-# 3. 角色映射与配音
-if st.session_state.script_data:
+# --- 第二步：高级角色配置（复刻截图界面）---
+if st.session_state.roles:
     st.divider()
-    st.header("🎭 第二步：角色音色映射")
-    st.info("请为左侧识别出的剧本角色，填写右侧 IndexTTS 模型中对应的角色名或 ID。")
-    
-    cols = st.columns(3)
-    role_list = list(st.session_state.roles)
-    
-    # 动态生成输入框，让用户输入 API 需要的 speaker 名称
-    for i, role in enumerate(role_list):
-        with cols[i % 3]:
-            # 默认填入角色名本身，方便用户修改
-            val = st.text_input(f"剧本角色: 【{role}】", value=role, key=f"map_{role}")
-            st.session_state.role_map[role] = val
-            st.caption(f"将在 API 中调用: {val}")
+    st.header("2. 角色音色与情感配置")
+    st.info("在此处配置每个角色的参考音频和情感参数，设置将应用于该角色的所有台词。")
 
-    st.divider()
-    st.header("🎬 第三步：生成配音")
-    
-    # 预览
-    with st.expander("分镜预览 (点击展开)"):
-        for item in st.session_state.script_data:
-            st.markdown(f"**{item['role']}**: {item['text']}")
-    
-    if st.button("🎧 调用 IndexTTS 开始合成", type="primary"):
-        if not tts_api_url:
-            st.error("请在侧边栏填写 IndexTTS API 地址！")
-        else:
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            audio_results = []
-            temp_dir = tempfile.mkdtemp()
+    # 为每个角色创建一个配置面板
+    for role in st.session_state.roles:
+        # 初始化该角色的默认设置
+        if role not in st.session_state.role_settings:
+            st.session_state.role_settings[role] = {
+                "ref_audio_path": "",
+                "emotion_mode": "使用情感向量",
+                "happy": 0.0, "angry": 0.0, "sad": 0.0, 
+                "fear": 0.0, "disgust": 0.0, "surprise": 0.0
+            }
+        
+        settings = st.session_state.role_settings[role]
+
+        with st.expander(f"👤 {role} 配置面板", expanded=False):
+            # 布局：左侧参考音频，右侧情感控制
+            c1, c2 = st.columns([2, 1])
             
-            total_lines = len(st.session_state.script_data)
-            
-            for i, item in enumerate(st.session_state.script_data):
-                role = item['role']
-                text = item['text']
-                # 获取映射后的 API 角色名
-                api_speaker = st.session_state.role_map.get(role, role)
+            with c1:
+                st.markdown("**参考音频 (Reference Audio)**")
+                # 选项 1：输入服务器路径 (截图风格)
+                path_val = st.text_input(
+                    f"本地路径 (如 I:/F5tts/{role}.wav)", 
+                    value=settings["ref_audio_path"],
+                    key=f"path_{role}"
+                )
                 
-                status_text.text(f"正在生成 ({i+1}/{total_lines}): {role} -> API[{api_speaker}]")
+                # 选项 2：上传文件 (适合 Streamlit Cloud)
+                uploaded_ref = st.file_uploader(f"或上传音频文件 ({role})", type=["wav", "mp3"], key=f"up_{role}")
                 
-                filename = f"{i:03d}_{role}.mp3"
-                filepath = os.path.join(temp_dir, filename)
-                
-                # 调用同步 HTTP 接口
-                success = generate_audio_index(tts_api_url, text, api_speaker, filepath)
-                
-                if success:
-                    audio_results.append({
-                        "role": role,
-                        "text": text,
-                        "file": filepath
-                    })
+                # 逻辑：如果有上传，优先使用上传的临时路径，否则使用输入的路径
+                if uploaded_ref:
+                    # 保存临时文件获取路径
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+                        tmp.write(uploaded_ref.getvalue())
+                        settings["ref_audio_path"] = tmp.name
                 else:
-                    status_text.warning(f"第 {i+1} 句生成失败，跳过。")
+                    settings["ref_audio_path"] = path_val
+
+            with c2:
+                st.markdown("**情感控制 (Emotion Control)**")
+                mode = st.selectbox(
+                    "控制模式", 
+                    ["与语音参考相同", "使用情感参考音频", "使用情感向量", "使用文本描述"],
+                    index=2, # 默认选中 "使用情感向量"
+                    key=f"mode_{role}"
+                )
+                settings["emotion_mode"] = mode
+
+            # --- 情感向量滑块 (仅当选择“使用情感向量”时显示) ---
+            if mode == "使用情感向量":
+                st.markdown("---")
+                st.markdown("**情感向量调节 (Emotion Vectors)**")
                 
-                progress_bar.progress((i + 1) / total_lines)
-                time.sleep(0.1) # 防止请求过快
+                # 使用多列布局复刻截图的排列
+                ec1, ec2, ec3 = st.columns(3)
                 
-            status_text.success("✅ 生成流程结束！")
+                with ec1:
+                    settings["happy"] = st.slider("快乐 (Happy)", 0.0, 1.0, settings["happy"], 0.1, key=f"happy_{role}")
+                    settings["fear"] = st.slider("恐惧 (Fear)", 0.0, 1.0, settings["fear"], 0.1, key=f"fear_{role}")
+                with ec2:
+                    settings["angry"] = st.slider("愤怒 (Angry)", 0.0, 1.0, settings["angry"], 0.1, key=f"angry_{role}")
+                    settings["disgust"] = st.slider("厌恶 (Disgust)", 0.0, 1.0, settings["disgust"], 0.1, key=f"disgust_{role}")
+                with ec3:
+                    settings["sad"] = st.slider("悲伤 (Sad)", 0.0, 1.0, settings["sad"], 0.1, key=f"sad_{role}")
+                    settings["surprise"] = st.slider("惊讶 (Surprise)", 0.0, 1.0, settings["surprise"], 0.1, key=f"surprise_{role}")
+
+    # --- 第三步：生成 ---
+    st.divider()
+    if st.button("🚀 开始批量合成", type="primary"):
+        st.write("正在根据上述高级配置生成音频...")
+        
+        progress = st.progress(0)
+        results = []
+        total = len(st.session_state.script_data)
+        temp_dir = tempfile.mkdtemp()
+
+        for i, line in enumerate(st.session_state.script_data):
+            role = line['role']
+            text = line['text']
             
-            # 播放结果
-            st.subheader("播放列表")
-            for audio in audio_results:
-                st.markdown(f"**{audio['role']}**: {audio['text']}")
-                st.audio(audio['file'])
+            # 获取该角色的特定配置
+            role_config = st.session_state.role_settings.get(role, {})
+            
+            file_name = f"{i}_{role}.mp3"
+            out_path = os.path.join(temp_dir, file_name)
+            
+            # 调用接口
+            success = generate_audio_advanced(tts_api_url, text, role_config, out_path)
+            
+            if success:
+                results.append({"role": role, "text": text, "file": out_path})
+            
+            progress.progress((i + 1) / total)
+            time.sleep(0.1)
+
+        st.success("合成完毕！")
+        for res in results:
+            with st.chat_message(name=res['role']):
+                st.write(res['text'])
+                st.audio(res['file'])
