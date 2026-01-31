@@ -5,6 +5,7 @@ import io
 import os
 import subprocess
 import tempfile
+import re
 
 st.set_page_config(page_title="AI小说配音工具", layout="wide")
 st.title("AI小说配音程序（自部署云端IndexTTS2）")
@@ -12,71 +13,51 @@ st.title("AI小说配音程序（自部署云端IndexTTS2）")
 # ==================== 侧边栏配置 ====================
 st.sidebar.header("API 配置")
 
-# Yunwu.ai 用于角色识别
 yunwu_api_key = st.sidebar.text_input("Yunwu.ai API Key (用于角色识别)", type="password")
 if not yunwu_api_key:
     st.sidebar.warning("请填写 Yunwu.ai Key 以启用角色识别")
 
-# 自部署 IndexTTS2 配置
 tts_base_url = st.sidebar.text_input(
     "IndexTTS2 API Base URL",
     value="https://ffo5lqa2aapiq89w-7860.containerx-gpu.com/",
     help="填写您的云端实例地址（包含末尾斜杠 / ）"
 )
 tts_api_key = st.sidebar.text_input("IndexTTS2 API Key (若无需认证可留空)", type="password", value="")
-tts_model = st.sidebar.text_input("IndexTTS2 模型名称", value="indextts2", help="常见值：indextts2、IndexTTS-2、tts-1 等，若报错请尝试修改")
+tts_model = st.sidebar.text_input("IndexTTS2 模型名称", value="indextts2", help="常见值：indextts2、IndexTTS-2 等")
 
 if not tts_base_url:
     st.warning("请在侧边栏输入您的 IndexTTS2 API Base URL")
     st.stop()
 
-# LLM 客户端
 if yunwu_api_key:
     llm_client = OpenAI(base_url="https://yunwu.ai/v1", api_key=yunwu_api_key)
 else:
     llm_client = None
 
-# ==================== 角色识别模型选择（支持自主填写） ====================
+# ==================== 角色识别模型选择 ====================
 st.sidebar.header("角色识别模型设置")
+st.sidebar.info("推荐使用 yunwu.ai 稳定模型：gpt-4o、claude-3-5-sonnet-20240620、gemini-1.5-pro")
 
-# 常用模型列表
 common_models = [
-    "gpt-4o",
-    "gpt-4o-mini",
-    "claude-3-5-sonnet-20240620",
-    "claude-3-5-sonnet-20241022",
-    "deepseek-chat",
-    "deepseek-reasoner",
-    "gemini-1.5-pro",
-    "gemini-1.5-flash",
-    "grok-beta",
-    "doubao-lite-32k",
-    "qwen-max",
-    "qwen2.5-72b-instruct",
-    # 可继续补充 yunwu.ai 支持的模型
+    "gpt-4o", "gpt-4o-mini",
+    "claude-3-5-sonnet-20240620", "claude-3-5-sonnet-20241022",
+    "deepseek-chat", "gemini-1.5-pro", "gemini-1.5-flash",
+    "grok-beta", "doubao-lite-32k"
 ]
 
-selected_preset = st.sidebar.selectbox(
-    "① 快速选择常用模型",
-    ["（不选）"] + common_models,
-    index=0,
-    help="选择后会自动填入下方输入框"
-)
-
+selected_preset = st.sidebar.selectbox("① 快速选择常用模型", ["（不选）"] + common_models, index=0)
 custom_model = st.sidebar.text_input(
     "② 模型名称（自主填写，以此为准）",
     value=selected_preset if selected_preset != "（不选）" else "",
-    placeholder="例如：gpt-4o / claude-3-5-sonnet-20241022 / 任意模型ID",
-    help="此处填写的内容将直接作为 model 参数传给 API，优先级最高"
+    placeholder="例如：gpt-4o"
 )
 
-# 最终模型名称逻辑
 final_model = custom_model.strip()
 if not final_model and selected_preset != "（不选）":
     final_model = selected_preset
 
 if not final_model:
-    st.sidebar.error("必须选择或填写一个角色识别模型名称")
+    st.sidebar.error("必须选择或填写一个模型名称")
     st.stop()
 
 st.sidebar.success(f"当前使用模型：**{final_model}**")
@@ -97,50 +78,72 @@ if uploaded_file:
 
 要求：
 1. 每段只能是“旁白”（叙述文字）或某个角色的台词。
-2. 自动识别所有出现的角色名。
-3. 输出严格为JSON数组，格式：[ {{"role": "角色名或旁白", "text": "该段完整文字"}} ]
-4. 覆盖全部文本，不添加任何解释或额外内容。
+2. 自动识别所有出现的角色名（角色名要准确、一致）。
+3. 输出严格为完整的JSON数组，格式：[ {{"role": "角色名或旁白", "text": "该段完整文字"}} ]
+4. text字段中的双引号必须转义为 \\"，确保JSON合法。
+5. 覆盖全部文本，绝不能截断。
+6. 只输出纯JSON，不要任何说明、代码块或额外文字。
 
 小说文本：
 {text}
 """
+
             try:
                 response = llm_client.chat.completions.create(
-                    model=final_model,  # 使用最终确定的模型
+                    model=final_model,
                     messages=[
-                        {"role": "system", "content": "你必须只输出纯JSON，不要任何说明。"},
+                        {"role": "system", "content": "你必须只输出完整的合法JSON数组，不能有任何多余字符。"},
                         {"role": "user", "content": prompt}
                     ],
-                    temperature=0.3,
-                    max_tokens=4096
+                    temperature=0.2,
+                    max_tokens=8192
                 )
                 content = response.choices[0].message.content.strip()
+
+                # 增强清理
                 if content.startswith("```"):
                     content = content.split("```")[1].strip()
-                    if content.startswith("json"):
+                    if content.lower().startswith("json"):
                         content = content[4:].strip()
-                segments = json.loads(content)
+
+                # 尝试直接解析
+                try:
+                    segments = json.loads(content)
+                except json.JSONDecodeError as e:
+                    st.warning(f"JSON解析失败，尝试自动修复：{e}")
+                    # 常见修复：补全括号、修复未闭合引号
+                    content = re.sub(r',\s*]', ']', content)  # 去掉末尾多余逗号
+                    content = re.sub(r'"\s*$', '"', content, flags=re.MULTILINE)  # 尝试闭合未结束的字符串
+                    content = content.strip()
+                    if not content.endswith(']'):
+                        content += ']'
+                    if not content.startswith('['):
+                        content = '[' + content
+                    try:
+                        segments = json.loads(content)
+                        st.info("自动修复成功")
+                    except Exception as e2:
+                        st.error(f"修复后仍失败：{e2}")
+                        st.code(content)
+                        st.stop()
+
                 st.session_state.segments = segments
-                st.session_state.full_text = text
                 unique_roles = list(set(s['role'] for s in segments if s['role'] != '旁白'))
                 st.success(f"识别完成！共 {len(segments)} 段，检测到角色：{unique_roles}")
+
             except Exception as e:
                 st.error(f"识别失败：{e}")
-                if 'content' in locals():
-                    st.code(content)
 
 # ==================== 生成音频 ====================
 if 'segments' in st.session_state:
     segments = st.session_state.segments
-
-    st.header("🎤 当前设置：统一使用默认声线（后续可扩展克隆）")
-    st.info("IndexTTS2 零样本克隆能力极强，后续可为每个角色上传参考音频实现不同声音")
-
-    # TTS 客户端
     tts_client = OpenAI(base_url=tts_base_url.rstrip("/"), api_key=tts_api_key or "none")
 
+    st.header("🎤 当前设置：统一使用默认声线")
+    st.info("IndexTTS2 零样本克隆能力极强，后续可扩展参考音频实现多角色不同声音")
+
     if st.button("🔊 生成完整配音", type="primary"):
-        with st.spinner("正在调用您的云端IndexTTS2生成并合并音频..."):
+        with st.spinner("正在调用云端IndexTTS2生成并合并音频..."):
             audio_bytes_list = []
             progress_bar = st.progress(0)
             for i, seg in enumerate(segments):
@@ -162,7 +165,7 @@ if 'segments' in st.session_state:
                 st.error("所有段落生成失败")
                 st.stop()
 
-            # 使用 ffmpeg 合并
+            # ffmpeg 合并
             with tempfile.TemporaryDirectory() as tmpdir:
                 input_paths = []
                 for idx, audio_bytes in enumerate(audio_bytes_list):
@@ -182,7 +185,6 @@ if 'segments' in st.session_state:
                     "-c", "copy", output_path
                 ], capture_output=True)
                 if result.returncode != 0:
-                    st.warning("直接合并失败，自动重新编码")
                     subprocess.run([
                         "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path,
                         "-c:a", "libmp3lame", output_path
@@ -199,11 +201,6 @@ if 'segments' in st.session_state:
                 file_name="AI配音_IndexTTS2.mp3",
                 mime="audio/mp3"
             )
-            st.success("配音生成并合并完成！")
+            st.success("配音生成完成！")
 
-st.info("""
-部署要求：
-- requirements.txt：streamlit\nopenai
-- packages.txt：ffmpeg
-首次运行建议用极短文本（1-2句）测试。如有新错误请截图发我。
-""")
+st.info("建议：首次测试请用极短文本（几百字）。如果仍报错，请截图完整错误和原始输出内容。")
